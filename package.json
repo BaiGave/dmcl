@@ -1,0 +1,29 @@
+{
+  "name": "mcdev-wizard",
+  "version": "0.1.0",
+  "description": "一键搭建 Minecraft 模组开发环境的脚手架 CLI（支持 Fabric / Forge / NeoForge）",
+  "type": "module",
+  "bin": {
+    "mcdev": "dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@clack/prompts": "^1.5.1",
+    "adm-zip": "^0.5.17",
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
+    "@types/node": "^25.9.2",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  }
+}
