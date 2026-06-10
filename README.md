@@ -9,8 +9,9 @@
 - 自动下载官方模板（fabric-example-mod / Forge MDK / NeoForge MDK）并完成改造：
   - 模组 ID、显示名、主类名、Java 包名全部替换
   - `gradle.properties` 中各组件版本号自动对齐所选 MC 版本
-- 国内镜像加速：Gradle 下载源自动切换腾讯云镜像（可选）
-- JDK 检测：按 MC 版本判断所需 Java 版本，未满足时给出下载指引
+- 国内镜像加速：Gradle 下载源自动切换腾讯云镜像，Maven 仓库注入 BMCLAPI + Alibaba 镜像
+- JDK 自动化：按 MC 版本判断所需 Java 版本 → 交互模式询问下载 → 通过 Adoptium API 自动拉取并安装 → 注入 `org.gradle.java.home`（无需配置全局环境变量）
+  - 首次下载后缓存至 `~/.mcdev/jdks/`，后续项目直接复用
 - 生成 `.vscode` 配置与扩展推荐，配合 Cursor / VS Code 开箱即用
 - 自动初始化 git 仓库
 
@@ -68,14 +69,15 @@ src/
 │   ├── forge.ts      # promotions（recommended/latest）
 │   └── neoforge.ts   # NeoForge 版本与 MDK 模板定位
 ├── loaders/          # 三个加载器的脚手架适配器
-└── core/             # 下载、解压、模板改造、镜像、JDK、.vscode
+└── core/             # 下载、解压、模板改造、JDK 下载、镜像、.vscode
 ```
 
 模板改造采用通用策略：自动探测模板根包名 → 全局替换占位符（包名、模组 ID、类名、显示名）→ 迁移包目录 → 重命名文件，因此对模板内部结构变化有较强适应性。
 
 ## 路线图
 
-- [ ] JDK 自动下载安装（Adoptium API）
-- [ ] Maven 仓库国内镜像注入
+- [x] JDK 自动下载安装（Adoptium API）
+- [x] Maven 仓库国内镜像注入
 - [ ] GUI 壳（Electron / Tauri，复用现有核心）
 - [ ] 生成后可选自动执行首次 `gradlew build`
+- [ ] `mappings` 版本选择（可按需选择 MojMap 或 Parchment）
