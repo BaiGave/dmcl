@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const UA = "mcdev-wizard (https://github.com/mcdev-wizard)";
+export const UA = "mcdev-wizard (https://github.com/mcdev-wizard)";
 
 interface FetchOpts {
   retries?: number;

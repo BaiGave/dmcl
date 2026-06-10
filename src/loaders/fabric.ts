@@ -10,12 +10,12 @@ import {
 } from "../meta/fabric.js";
 import type { Logger, ProjectOptions } from "../types.js";
 
-/** fabric-example-mod 按 MC 大版本拆分支，找不到就退回 master */
+/** fabric-example-mod 按精确版本分支：优先 26.1.2 → 1.21.4 → 1.21 → master */
 function branchCandidates(mcVersion: string): string[] {
-  const out: string[] = [];
-  if (mcVersion.startsWith("1.")) {
-    const [major, minor] = mcVersion.split(".");
-    out.push(`${major}.${minor}`);
+  const out = [mcVersion];
+  const parts = mcVersion.split(".");
+  if (parts.length >= 3) {
+    out.push(`${parts[0]}.${parts[1]}`);
   }
   out.push("master");
   return out;

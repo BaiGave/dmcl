@@ -2,6 +2,7 @@
 import * as p from "@clack/prompts";
 import pc from "picocolors";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { spawnSync } from "node:child_process";
@@ -15,7 +16,16 @@ import { scaffoldForge } from "./loaders/forge.js";
 import { scaffoldNeoForge } from "./loaders/neoforge.js";
 import { applyChinaMirror } from "./core/mirror.js";
 import { writeCursorConfig } from "./core/vscode.js";
-import { adoptiumDownloadUrl, detectJavaMajor, requiredJavaFor } from "./core/jdk.js";
+import {
+  detectJavaMajor,
+  downloadWithProgress,
+  extractJdk,
+  fetchJdkDownloadUrl,
+  findCachedJdk,
+  injectJdkHome,
+  requiredJavaFor,
+} from "./core/jdk.js";
+import { injectBuildscriptMirrors, injectMavenMirrors } from "./core/maven.js";
 
 const MOD_ID_RE = /^[a-z][a-z0-9_]{1,63}$/;
 const GROUP_RE = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/;
@@ -49,7 +59,11 @@ async function scaffold(opts: ProjectOptions, log: (msg: string) => void): Promi
   else if (opts.loader === "forge") await scaffoldForge(opts, log);
   else await scaffoldNeoForge(opts, log);
 
-  if (opts.mirror) await applyChinaMirror(opts.targetDir, log);
+  if (opts.mirror) {
+    await applyChinaMirror(opts.targetDir, log);
+    await injectMavenMirrors(opts.targetDir, log);
+    await injectBuildscriptMirrors(opts.targetDir, log);
+  }
 
   await writeCursorConfig(opts.targetDir);
   log("已生成 Cursor / VS Code 配置（.vscode）");
@@ -58,17 +72,89 @@ async function scaffold(opts: ProjectOptions, log: (msg: string) => void): Promi
   if (git.status === 0) log("已初始化 git 仓库");
 }
 
+/** 交互式 JDK 处理：缓存命中直接注入，否则询问下载 */
+async function handleJdkInteractive(opts: ProjectOptions, log: (msg: string) => void): Promise<void> {
+  const java = requiredJavaFor(opts.mcVersion);
+  const detected = detectJavaMajor();
+  if (detected !== null && detected >= java) return; // 已满足
+
+  // 检查缓存
+  const cached = findCachedJdk(java);
+  if (cached) {
+    log(`使用缓存的 JDK ${java}（${cached}）`);
+    await injectJdkHome(opts.targetDir, cached);
+    return;
+  }
+
+  const label = detected === null ? "未检测到 Java" : `当前 Java ${detected} 不满足要求（需要 ≥ ${java}）`;
+  const shouldDownload = await p.confirm({
+    message: `${label}。是否自动下载安装 JDK ${java}？（约 200 MB）`,
+    initialValue: true,
+  });
+  if (p.isCancel(shouldDownload) || !shouldDownload) return;
+
+  await downloadAndInjectJdk(java, opts.targetDir, log);
+}
+
+/** 非交互模式 JDK 处理：有缓存直接用，否则跳过（由用户自行解决） */
+async function handleJdkNonInteractive(opts: ProjectOptions, log: (msg: string) => void): Promise<void> {
+  const java = requiredJavaFor(opts.mcVersion);
+  const detected = detectJavaMajor();
+  if (detected !== null && detected >= java) return;
+
+  const cached = findCachedJdk(java);
+  if (cached) {
+    log(`使用缓存的 JDK ${java}（${cached}）`);
+    await injectJdkHome(opts.targetDir, cached);
+    return;
+  }
+  // 非交互模式跳过，由 printNextSteps 提示
+}
+
+async function downloadAndInjectJdk(javaMajor: number, targetDir: string, log: (msg: string) => void): Promise<void> {
+  const asset = await fetchJdkDownloadUrl(javaMajor);
+  if (!asset) {
+    log(`查询 JDK ${javaMajor} 下载地址失败，请手动安装：https://adoptium.net`);
+    return;
+  }
+
+  const tmpDir = path.join(os.tmpdir(), `mcdev-jdk-${javaMajor}-${Date.now()}`);
+  const zipDest = path.join(tmpDir, asset.filename);
+  await fs.promises.mkdir(tmpDir, { recursive: true });
+
+  log(`下载 JDK ${javaMajor} ${asset.versionLabel}（${(asset.sizeBytes / 1024 / 1024).toFixed(0)} MB）…`);
+  await downloadWithProgress(asset.url, zipDest, asset.sizeBytes, (pct) => {
+    log(`下载 JDK ${pct}%`);
+  });
+
+  log("解压 JDK…");
+  const jdkPath = await extractJdk(zipDest, javaMajor);
+
+  // 清理临时文件
+  await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+
+  log(`JDK 已安装至 ${jdkPath}`);
+  await injectJdkHome(targetDir, jdkPath);
+  log(`已配置 org.gradle.java.home`);
+}
+
 function printNextSteps(opts: ProjectOptions): void {
   const java = requiredJavaFor(opts.mcVersion);
   const detected = detectJavaMajor();
+  const cached = findCachedJdk(java);
+  const hasJdk = (detected !== null && detected >= java) || cached !== null;
   const lines: string[] = [];
 
-  if (detected === null) {
-    lines.push(pc.yellow(`⚠ 未检测到 Java。该版本需要 JDK ${java}，请先安装：`));
-    lines.push(pc.yellow(`  ${adoptiumDownloadUrl(java)}`));
-  } else if (detected < java) {
-    lines.push(pc.yellow(`⚠ 当前 Java ${detected} 过旧，该版本需要 JDK ${java}：`));
-    lines.push(pc.yellow(`  ${adoptiumDownloadUrl(java)}`));
+  if (!hasJdk) {
+    if (detected === null) {
+      lines.push(pc.yellow(`⚠ 未检测到 Java。该版本需要 JDK ${java}，请先安装：`));
+      lines.push(pc.yellow(`  https://adoptium.net/zh-CN/temurin/releases/?version=${java}`));
+    } else {
+      lines.push(pc.yellow(`⚠ 当前 Java ${detected} 过旧，该版本需要 JDK ${java}：`));
+      lines.push(pc.yellow(`  https://adoptium.net/zh-CN/temurin/releases/?version=${java}`));
+    }
+  } else if (cached) {
+    lines.push(pc.green(`✔ 使用项目内置的 JDK ${java}（已配置 org.gradle.java.home）`));
   } else {
     lines.push(pc.green(`✔ Java ${detected} 满足要求（需要 ≥ ${java}）`));
   }
@@ -144,6 +230,8 @@ async function main(): Promise<void> {
     const s = p.spinner();
     s.start("正在生成项目");
     await scaffold(opts, (msg) => s.message(msg));
+    s.message("检查 JDK…");
+    await handleJdkNonInteractive(opts, (msg) => s.message(msg));
     s.stop(`项目已生成：${opts.targetDir}`);
     printNextSteps(opts);
     p.outro("完成");
@@ -244,6 +332,8 @@ async function main(): Promise<void> {
   s2.start("正在生成项目");
   try {
     await scaffold(opts, (msg) => s2.message(msg));
+    s2.message("检查 JDK…");
+    await handleJdkInteractive(opts, (msg) => s2.message(msg));
   } catch (err) {
     s2.stop("生成失败");
     bail((err as Error).message);
