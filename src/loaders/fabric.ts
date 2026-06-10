@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { urlExists } from "../core/http.js";
 import { adaptTemplate, downloadAndExtract } from "../core/template.js";
 import { patchProperties } from "../core/fsutils.js";
+import { applyMappings } from "../core/mappings.js";
 import {
   fetchFabricApiVersion,
   fetchFabricLoaderVersion,
@@ -38,9 +39,10 @@ export async function scaffoldFabric(opts: ProjectOptions, log: Logger): Promise
 
   // 元数据查询失败不应中断生成：模板自带的版本号仍然可用
   log("查询 Fabric 各组件版本…");
+  const needYarn = opts.mappings === "yarn";
   const [loaderVersion, yarnVersion, apiVersion] = await Promise.all([
     fetchFabricLoaderVersion().catch(() => null),
-    fetchYarnVersion(opts.mcVersion),
+    needYarn ? fetchYarnVersion(opts.mcVersion) : Promise.resolve(null),
     fetchFabricApiVersion(opts.mcVersion),
   ]);
 
@@ -55,7 +57,7 @@ export async function scaffoldFabric(opts: ProjectOptions, log: Logger): Promise
   const gradleProps = path.join(opts.targetDir, "gradle.properties");
   const patched = await patchProperties(gradleProps, {
     minecraft_version: opts.mcVersion,
-    yarn_mappings: yarnVersion,
+    yarn_mappings: needYarn ? yarnVersion : undefined,
     loader_version: loaderVersion,
     // 不同分支的键名不同，两个都尝试
     fabric_version: apiVersion,
@@ -65,6 +67,9 @@ export async function scaffoldFabric(opts: ProjectOptions, log: Logger): Promise
     archives_base_name: opts.modId,
   });
   log(`已更新 gradle.properties（${patched.join(", ")}）`);
+
+  // 映射表配置（在 properties 补丁之后，以免 mappings_variant 被覆盖）
+  await applyMappings(opts, log);
 
   // 模板自带的 LICENSE 是 CC0 模板文件，提醒用户自行决定
   const licenseFile = path.join(opts.targetDir, "LICENSE");

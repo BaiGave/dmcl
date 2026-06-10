@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { spawnSync } from "node:child_process";
-import { LOADER_LABELS, type LoaderId, type ProjectOptions } from "./types.js";
+import { LOADER_LABELS, MAPPINGS_FOR_LOADER, MAPPINGS_LABELS, type LoaderId, type MappingsId, type ProjectOptions } from "./types.js";
 import { fetchReleaseVersions } from "./meta/mojang.js";
 import { fetchFabricGameVersions } from "./meta/fabric.js";
 import { forgeSupportedMcVersions } from "./meta/forge.js";
@@ -26,6 +26,7 @@ import {
   requiredJavaFor,
 } from "./core/jdk.js";
 import { injectBuildscriptMirrors, injectMavenMirrors } from "./core/maven.js";
+import { runGradleBuild } from "./core/build.js";
 
 const MOD_ID_RE = /^[a-z][a-z0-9_]{1,63}$/;
 const GROUP_RE = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/;
@@ -176,6 +177,8 @@ interface CliArgs {
   group?: string;
   dir?: string;
   "no-mirror"?: boolean;
+  mappings?: string;
+  build?: boolean;
   yes?: boolean;
 }
 
@@ -189,6 +192,8 @@ function parseCli(): CliArgs {
       group: { type: "string" },
       dir: { type: "string" },
       "no-mirror": { type: "boolean" },
+      mappings: { type: "string" },
+      build: { type: "boolean" },
       yes: { type: "boolean", short: "y" },
     },
     allowPositionals: false,
@@ -217,6 +222,8 @@ async function main(): Promise<void> {
     const modId = args.modid;
     if (!MOD_ID_RE.test(modId)) bail("modid 需为全小写字母/数字/下划线，且以字母开头");
     const displayName = args.name ?? pascalCase(modId);
+    const mappingsRaw = args.mappings ?? (loader === "fabric" ? "yarn" : "mojmap");
+    if (!["yarn", "mojmap", "parchment"].includes(mappingsRaw)) bail(`未知映射表：${mappingsRaw}`);
     const opts: ProjectOptions = {
       loader,
       mcVersion: args.mc,
@@ -226,6 +233,7 @@ async function main(): Promise<void> {
       group: args.group ?? `com.example.${modId.replace(/_/g, "")}`,
       targetDir: path.resolve(args.dir ?? modId),
       mirror: !args["no-mirror"],
+      mappings: mappingsRaw as MappingsId,
     };
     const s = p.spinner();
     s.start("正在生成项目");
@@ -233,6 +241,9 @@ async function main(): Promise<void> {
     s.message("检查 JDK…");
     await handleJdkNonInteractive(opts, (msg) => s.message(msg));
     s.stop(`项目已生成：${opts.targetDir}`);
+    if (args.build) {
+      await runGradleBuild(opts.targetDir, console.log);
+    }
     printNextSteps(opts);
     p.outro("完成");
     return;
@@ -272,6 +283,18 @@ async function main(): Promise<void> {
     maxItems: 12,
   })) as string;
   if (p.isCancel(mcVersion)) bail("已取消");
+
+  const mappingsOptions = MAPPINGS_FOR_LOADER[loader].map((m) => ({
+    value: m,
+    label: MAPPINGS_LABELS[m],
+  }));
+  const mappings = (mappingsOptions.length === 1)
+    ? mappingsOptions[0].value
+    : (await p.select({
+        message: "选择映射表（Mappings）",
+        options: mappingsOptions,
+      })) as MappingsId;
+  if (p.isCancel(mappings)) bail("已取消");
 
   const modId = (await p.text({
     message: "模组 ID（全小写，用于注册名/资源目录）",
@@ -326,6 +349,7 @@ async function main(): Promise<void> {
     group,
     targetDir,
     mirror,
+    mappings,
   };
 
   const s2 = p.spinner();
@@ -339,6 +363,16 @@ async function main(): Promise<void> {
     bail((err as Error).message);
   }
   s2.stop(`项目已生成：${pc.bold(opts.targetDir)}`);
+
+  // 询问是否立即构建验证
+  const doBuild = await p.confirm({
+    message: "是否立即運行 gradlew build 驗證？（首次需下載 Minecraft，約 5~20 分鐘）",
+    initialValue: false,
+  });
+  if (!p.isCancel(doBuild) && doBuild) {
+    p.intro(pc.bgCyan(pc.black(" 構建驗證 ")));
+    await runGradleBuild(opts.targetDir, console.log);
+  }
 
   printNextSteps(opts);
   p.outro("祝模组开发愉快！");

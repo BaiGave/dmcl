@@ -95,7 +95,7 @@ export async function removeEmptyDirs(dir: string): Promise<boolean> {
   return empty;
 }
 
-/** 修改 .properties 文件中已存在的键（不存在的键跳过） */
+/** 修改 .properties 文件中已存在的键；不存在的键追加到文件末尾 */
 export async function patchProperties(file: string, entries: Record<string, string | null | undefined>): Promise<string[]> {
   if (!fs.existsSync(file)) return [];
   let content = await fs.promises.readFile(file, "utf8");
@@ -105,6 +105,9 @@ export async function patchProperties(file: string, entries: Record<string, stri
     const re = new RegExp(`^([ \\t]*${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[ \\t]*=).*$`, "m");
     if (re.test(content)) {
       content = content.replace(re, (_m, prefix: string) => `${prefix}${value}`);
+      patched.push(key);
+    } else {
+      content = content.trimEnd() + `\n${key}=${value}\n`;
       patched.push(key);
     }
   }

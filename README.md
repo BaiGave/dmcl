@@ -13,6 +13,9 @@
 - JDK 自动化：按 MC 版本判断所需 Java 版本 → 交互模式询问下载 → 通过 Adoptium API 自动拉取并安装 → 注入 `org.gradle.java.home`（无需配置全局环境变量）
   - 首次下载后缓存至 `~/.mcdev/jdks/`，后续项目直接复用
 - 生成 `.vscode` 配置与扩展推荐，配合 Cursor / VS Code 开箱即用
+- 映射表选择：支持 Yarn / MojMap / Parchment（Fabric），MojMap / Parchment（Forge & NeoForge），自动查询 Parchment 最新版本
+- 生成后可选自动执行 `gradlew build` 验证项目可编译
+- GUI 桌面应用（Electron）：下拉选版本、一键生成（`npm run gui`）
 - 自动初始化 git 仓库
 
 ## 使用
@@ -20,6 +23,7 @@
 ```bash
 npm install
 npm run dev          # 交互模式
+npm run gui          # GUI 桌面应用（Electron）
 ```
 
 非交互模式（适合脚本/CI）：
@@ -37,6 +41,8 @@ npm run dev -- --yes --loader fabric --mc 1.21.4 --modid mymod --name "My Mod"
 | `--group` | Java 包名（默认 `com.example.<modid>`） |
 | `--dir` | 输出目录（默认 `./<modid>`） |
 | `--no-mirror` | 不使用国内镜像 |
+| `--mappings` | 映射表：`yarn` / `mojmap` / `parchment` |
+| `--build` | 生成后执行 `gradlew build` 验证 |
 | `--yes` / `-y` | 非交互模式 |
 
 ## 生成后
@@ -78,6 +84,8 @@ src/
 
 - [x] JDK 自动下载安装（Adoptium API）
 - [x] Maven 仓库国内镜像注入
-- [ ] GUI 壳（Electron / Tauri，复用现有核心）
-- [ ] 生成后可选自动执行首次 `gradlew build`
-- [ ] `mappings` 版本选择（可按需选择 MojMap 或 Parchment）
+- [x] 映射表选择（Yarn / MojMap / Parchment）
+- [x] 生成后自动构建验证
+- [x] GUI 桌面应用（Electron）
+- [ ] 包管理 GUI 打包（electron-builder → 单文件 exe/dmg）
+- [ ] 可选中生成示例物品/方块代码

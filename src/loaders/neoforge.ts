@@ -2,6 +2,7 @@ import path from "node:path";
 import { urlExists } from "../core/http.js";
 import { adaptTemplate, downloadAndExtract } from "../core/template.js";
 import { patchProperties } from "../core/fsutils.js";
+import { applyMappings } from "../core/mappings.js";
 import { fetchNeoForgeVersions, neoMdkZipCandidates, pickNeoForgeVersion } from "../meta/neoforge.js";
 import type { Logger, ProjectOptions } from "../types.js";
 
@@ -46,4 +47,6 @@ export async function scaffoldNeoForge(opts: ProjectOptions, log: Logger): Promi
     mod_description: `${opts.displayName} - 使用 mcdev-wizard 生成`,
   });
   if (patched.length > 0) log(`已更新 gradle.properties（${patched.join(", ")}）`);
+
+  await applyMappings(opts, log);
 }

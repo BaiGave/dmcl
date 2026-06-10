@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mcdev-wizard</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --border: #30363d;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --text: #c9d1d9;
+    --dim: #8b949e;
+    --danger: #f85149;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex; justify-content: center; align-items: center;
+    min-height: 100vh; padding: 24px;
+  }
+  .app {
+    width: 100%; max-width: 620px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 32px;
+  }
+  h1 {
+    font-size: 22px; margin-bottom: 4px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .sub { color: var(--dim); font-size: 13px; margin-bottom: 24px; }
+
+  .step { display: none; }
+  .step.active { display: block; }
+
+  .cards { display: flex; gap: 12px; flex-wrap: wrap; }
+  .card {
+    flex: 1; min-width: 140px;
+    border: 2px solid var(--border); border-radius: 10px;
+    padding: 16px; cursor: pointer; text-align: center;
+    transition: border-color .15s, background .15s;
+  }
+  .card:hover, .card.selected { border-color: var(--accent); background: rgba(88,166,255,.06); }
+  .card .icon { font-size: 32px; margin-bottom: 8px; }
+  .card .label { font-weight: 600; font-size: 14px; }
+  .card .hint { font-size: 11px; color: var(--dim); margin-top: 4px; }
+
+  .form-group { margin-bottom: 16px; }
+  .form-group label { display: block; font-size: 13px; color: var(--dim); margin-bottom: 6px; }
+  .form-group input, .form-group select {
+    width: 100%; padding: 8px 12px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); font-size: 14px;
+    outline: none;
+  }
+  .form-group input:focus, .form-group select:focus { border-color: var(--accent); }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 10px 24px; border-radius: 8px; border: none;
+    font-size: 14px; font-weight: 600; cursor: pointer;
+    transition: opacity .15s;
+  }
+  .btn:hover { opacity: .85; }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-primary { background: var(--accent2); color: #000; }
+  .btn-secondary { background: var(--border); color: var(--text); }
+  .btn-group { display: flex; gap: 8px; margin-top: 24px; }
+
+  .log {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px; height: 200px;
+    overflow-y: auto; font-family: "JetBrains Mono", monospace;
+    font-size: 12px; line-height: 1.7;
+  }
+  .log .err { color: var(--danger); }
+  .log .ok { color: var(--accent2); }
+
+  .done-box {
+    text-align: center; padding: 40px 20px;
+    font-size: 18px; font-weight: 600; color: var(--accent2);
+  }
+  .done-box p { color: var(--dim); font-size: 13px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>mcdev-wizard</h1>
+  <p class="sub">Minecraft 模组开发环境一键搭建</p>
+
+  <!-- Step 1: Loader -->
+  <div class="step active" id="step-loader">
+    <p style="margin-bottom:12px;font-size:14px;">选择模组加载器</p>
+    <div class="cards" id="loader-cards"></div>
+    <div class="btn-group">
+      <button class="btn btn-primary" id="loader-next" disabled>下一步</button>
+    </div>
+  </div>
+
+  <!-- Step 2: MC version + mappings + mod info -->
+  <div class="step" id="step-config">
+    <div class="form-group">
+      <label>Minecraft 版本</label>
+      <select id="sel-mc"></select>
+    </div>
+    <div class="form-group" id="mappings-group">
+      <label>映射表（Mappings）</label>
+      <select id="sel-mappings"></select>
+    </div>
+    <div class="form-group">
+      <label>模组 ID（全小写，用于注册名/资源）</label>
+      <input id="inp-modid" placeholder="mymod" value="mymod" maxlength="64">
+    </div>
+    <div class="form-group">
+      <label>模组显示名称</label>
+      <input id="inp-name" placeholder="My Mod" value="My Mod">
+    </div>
+    <div class="form-group">
+      <label>Java 包名（Maven group）</label>
+      <input id="inp-group" placeholder="com.example.mymod" value="com.example.mymod">
+    </div>
+    <div class="form-group">
+      <label>输出目录</label>
+      <input id="inp-dir" placeholder="mymod" value="mymod">
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--dim);margin-bottom:4px;">
+      <input type="checkbox" id="chk-mirror" checked> 使用国内镜像加速
+    </label>
+    <div class="btn-group">
+      <button class="btn btn-secondary" id="config-back">返回</button>
+      <button class="btn btn-primary" id="config-gen">生成项目</button>
+    </div>
+  </div>
+
+  <!-- Step 3: Generating -->
+  <div class="step" id="step-gen">
+    <p style="margin-bottom:8px;">正在生成项目…</p>
+    <div class="log" id="gen-log"></div>
+    <div class="btn-group" style="justify-content:center;">
+      <button class="btn btn-secondary" id="gen-cancel">取消</button>
+    </div>
+  </div>
+
+  <!-- Step 4: Done -->
+  <div class="step" id="step-done">
+    <div class="done-box">
+      <div style="font-size:48px;margin-bottom:8px;">&#10003;</div>
+      <div id="done-title">项目已生成</div>
+      <p id="done-path"></p>
+    </div>
+    <div class="btn-group" style="justify-content:center;">
+      <button class="btn btn-primary" id="done-open">在 Cursor 中打开</button>
+      <button class="btn btn-secondary" id="done-restart">重新开始</button>
+    </div>
+  </div>
+</div>
+
+<script src="renderer.js"></script>
+</body>
+</html>
