@@ -15,16 +15,18 @@
 - 生成 `.vscode` 配置与扩展推荐，配合 Cursor / VS Code 开箱即用
 - 映射表选择：支持 Yarn / MojMap / Parchment（Fabric），MojMap / Parchment（Forge & NeoForge），自动查询 Parchment 最新版本
 - 生成后可选自动执行 `gradlew build` 验证项目可编译
-- GUI 桌面应用（Electron）：下拉选版本、一键生成（`npm run gui`）
+- GUI 桌面应用（Electron）：下拉选版本、一键生成，双击 `启动.bat` 即用
 - 自动初始化 git 仓库
 
 ## 使用
 
 ```bash
 npm install
-npm run dev          # 交互模式
+npm run dev          # CLI 交互模式
 npm run gui          # GUI 桌面应用（Electron）
 ```
+
+> **新手推荐**：直接双击项目根目录的 `启动.bat`，自动安装依赖并打开 GUI。
 
 非交互模式（适合脚本/CI）：
 
