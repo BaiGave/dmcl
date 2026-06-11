@@ -244,12 +244,16 @@
   }
 
   // ============ Step 4: Done ============
-  var doneOpen = $("done-open");
+  var doneClose = $("done-close");
   var doneRestart = $("done-restart");
-  if (doneOpen) doneOpen.addEventListener("click", function () {
-    alert("项目已生成在：" + projectDir + "\n请在 Cursor 中手动打开该目录。");
-  });
-  if (doneRestart) doneRestart.addEventListener("click", function () { location.reload(); });
+  if (doneClose) {
+    doneClose.addEventListener("click", function () {
+      window.close();
+    });
+  }
+  if (doneRestart) {
+    doneRestart.addEventListener("click", function () { location.reload(); });
+  }
 
   console.log("[mcdev] Renderer ready ✓");
 })();
