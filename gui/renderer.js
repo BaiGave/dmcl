@@ -205,6 +205,7 @@
       var reader = resp.body.getReader();
       var decoder = new TextDecoder("utf-8");
       var buffer = "";
+      var exitCode = null;
 
       // eslint-disable-next-line no-constant-condition
       while (true) {
@@ -218,16 +219,24 @@
         for (var li = 0; li < lines.length; li++) {
           var line = lines[li].trim();
           if (!line) continue;
+          if (line.indexOf("__EXIT__:") === 0) {
+            exitCode = parseInt(line.slice("__EXIT__:".length), 10);
+            continue;
+          }
           var div = document.createElement("div");
-          if (line.indexOf("错误") >= 0 || line.indexOf("失败") >= 0 || line.indexOf("FAIL") >= 0) {
+          if (line.indexOf("错误") >= 0 || line.indexOf("失败") >= 0 || line.indexOf("FAIL") >= 0 || line.indexOf("ERROR") >= 0) {
             div.style.color = "#f85149";
-          } else if (line.indexOf("成功") >= 0 || line.indexOf("完成") >= 0) {
+          } else if (line.indexOf("成功") >= 0 || line.indexOf("完成") >= 0 || line.indexOf("已生成") >= 0) {
             div.style.color = "#3fb950";
           }
           div.textContent = line;
           log.appendChild(div);
         }
         log.scrollTop = log.scrollHeight;
+      }
+
+      if (exitCode !== null && exitCode !== 0) {
+        throw new Error("生成进程退出码 " + exitCode + "（请查看上方日志）");
       }
     } catch (err) {
       var div = document.createElement("div");
@@ -245,7 +254,7 @@
 
   // ============ Step 4: Done ============
   var doneClose = $("done-close");
-  var doneRestart = $("done-restart");
+  var doneOpenFolder = $("done-open-folder");
   if (doneClose) {
     doneClose.addEventListener("click", function () {
       fetch("/api/close").then(function () {
@@ -255,8 +264,16 @@
       });
     });
   }
-  if (doneRestart) {
-    doneRestart.addEventListener("click", function () { location.reload(); });
+  if (doneOpenFolder) {
+    doneOpenFolder.addEventListener("click", function () {
+      fetch("/api/open-folder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: projectDir }),
+      }).catch(function () {
+        // 非 Electron 环境回退：什么都不做
+      });
+    });
   }
 
   console.log("[mcdev] Renderer ready ✓");

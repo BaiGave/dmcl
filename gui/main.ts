@@ -29,9 +29,13 @@ function serveGui(req: IncomingMessage, res: ServerResponse): void {
       try { args = JSON.parse(body).args; } catch { args = []; }
 
       const projectRoot = path.resolve(__dirname, "..");
-      const child = spawn("npx", ["tsx", "src/index.ts", ...args], {
+      const nodeExe = process.execPath;                             // Electron 二进制，配合 ELECTRON_RUN_AS_NODE 当 node 用
+      const tsxModule = path.join(projectRoot, "node_modules", "tsx", "dist", "cli.mjs");
+      const cliScript = path.join(projectRoot, "src", "index.ts");
+
+      const child = spawn(nodeExe, [tsxModule, cliScript, ...args], {
         cwd: projectRoot,
-        env: { ...process.env, FORCE_COLOR: "0" },
+        env: { ...process.env, FORCE_COLOR: "0", ELECTRON_RUN_AS_NODE: "1" },
         stdio: ["ignore", "pipe", "pipe"],
       });
 
@@ -42,9 +46,13 @@ function serveGui(req: IncomingMessage, res: ServerResponse): void {
       };
       child.stdout!.on("data", push);
       child.stderr!.on("data", push);
-      child.on("close", () => res.end());
+      child.on("close", (code) => {
+        res.write(`__EXIT__:${code ?? 0}\n`);
+        res.end();
+      });
       child.on("error", (err) => {
         res.write(`ERROR: ${err.message}\n`);
+        res.write(`__EXIT__:1\n`);
         res.end();
       });
     });
@@ -56,6 +64,20 @@ function serveGui(req: IncomingMessage, res: ServerResponse): void {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true }));
     if (mainWindow) mainWindow.close();
+    return;
+  }
+
+  // API: open folder in explorer
+  if (url === "/api/open-folder" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk) => body += chunk);
+    req.on("end", () => {
+      let dirPath = "";
+      try { dirPath = JSON.parse(body).path; } catch { /* ignore */ }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      if (dirPath) shell.openPath(dirPath);
+      res.end(JSON.stringify({ ok: !!dirPath }));
+    });
     return;
   }
 
