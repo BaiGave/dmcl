@@ -4,3 +4,4 @@ dist/
 .DS_Store
 .commit-msg.tmp
 _test_*.ts
+test_*.txt
