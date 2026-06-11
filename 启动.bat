@@ -29,5 +29,5 @@ if %errorlevel% neq 0 (
 )
 
 echo [启动] 正在打开 mcdev-wizard 窗口...
-start "" /B npx electron gui/main.js
-echo [提示] 如果窗口被防火墙拦截，请允许访问。
+call npx electron gui/main.js
+pause
