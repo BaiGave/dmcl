@@ -1,77 +1,128 @@
-import { app, BrowserWindow, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, shell } from "electron";
+import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { spawn } from "node:child_process";
-import path from "node:path";
 import fs from "node:fs";
+import path from "node:path";
 
+const PORT = 19089;
 let mainWindow: BrowserWindow | null = null;
+
+// ============ Minimal HTTP server for GUI ============
+
+function serveGui(req: IncomingMessage, res: ServerResponse): void {
+  const url = req.url === "/" ? "/index.html" : req.url ?? "/";
+  const guiDir = path.join(__dirname);
+  const filePath = path.join(guiDir, path.normalize(url).replace(/^\/+/, ""));
+
+  // API: run CLI generation
+  if (url === "/api/generate" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk) => body += chunk);
+    req.on("end", () => {
+      res.writeHead(200, {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Transfer-Encoding": "chunked",
+        "X-Content-Type-Options": "nosniff",
+      });
+
+      let args: string[];
+      try { args = JSON.parse(body).args; } catch { args = []; }
+
+      const projectRoot = path.resolve(__dirname, "..");
+      const child = spawn("npx", ["tsx", "src/index.ts", ...args], {
+        cwd: projectRoot,
+        env: { ...process.env, FORCE_COLOR: "0" },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      const push = (data: Buffer) => {
+        for (const line of data.toString("utf8").split("\n")) {
+          if (line.trim()) res.write(line.trim() + "\n");
+        }
+      };
+      child.stdout!.on("data", push);
+      child.stderr!.on("data", push);
+      child.on("close", () => res.end());
+      child.on("error", (err) => {
+        res.write(`ERROR: ${err.message}\n`);
+        res.end();
+      });
+    });
+    return;
+  }
+
+  // API: open directory picker
+  if (url === "/api/select-dir") {
+    dialog.showOpenDialog(mainWindow!, {
+      properties: ["openDirectory", "createDirectory"],
+      title: "选择模组项目输出目录",
+    }).then((result) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      if (result.canceled || result.filePaths.length === 0) {
+        res.end(JSON.stringify({ canceled: true }));
+      } else {
+        res.end(JSON.stringify({ path: result.filePaths[0] }));
+      }
+    }).catch((err) => {
+      res.writeHead(500);
+      res.end(JSON.stringify({ error: err.message }));
+    });
+    return;
+  }
+
+  // Static file serving
+  if (!fs.existsSync(filePath)) {
+    res.writeHead(404);
+    res.end("404");
+    return;
+  }
+
+  const ext = path.extname(filePath);
+  const mime: Record<string, string> = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json",
+    ".png": "image/png",
+  };
+  res.writeHead(200, {
+    "Content-Type": mime[ext] ?? "text/plain",
+    "Cache-Control": "no-cache",
+  });
+  fs.createReadStream(filePath).pipe(res);
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 720,
-    height: 620,
-    resizable: false,
+    width: 760,
+    height: 660,
+    resizable: true,
     title: "mcdev-wizard",
-    webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
     autoHideMenuBar: true,
   });
-  mainWindow.loadFile(path.join(__dirname, "index.html"));
-}
 
-// ---------- IPC ----------
+  mainWindow.loadURL(`http://localhost:${PORT}`);
 
-ipcMain.handle("gen:run", async (_event, args: string[]) => {
-  const projectRoot = path.resolve(__dirname, "..");
-  const child = spawn("npx", ["tsx", "src/index.ts", ...args], {
-    cwd: projectRoot,
-    env: { ...process.env, FORCE_COLOR: "0" },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-
-  return new Promise<string[]>((resolve) => {
-    const lines: string[] = [];
-    const collect = (data: Buffer) => {
-      for (const line of data.toString("utf8").split("\n")) {
-        const t = line.trim();
-        if (t) {
-          lines.push(t);
-          mainWindow?.webContents.send("gen:line", t);
-        }
-      }
-    };
-    child.stdout!.on("data", collect);
-    child.stderr!.on("data", collect);
-    child.on("close", () => resolve(lines));
-    child.on("error", (err) => {
-      lines.push(`错误：${err.message}`);
-      resolve(lines);
-    });
-  });
-});
-
-ipcMain.handle("fs:write", async (_event, filePath: string, content: string) => {
-  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.promises.writeFile(filePath, content, "utf8");
-  return true;
-});
-
-ipcMain.handle("fs:exists", async (_event, p: string) => fs.existsSync(p));
-
-ipcMain.handle("app:open", async (_event, dir: string) => {
-  // 优先用 cursor，退化为 explorer
-  try {
-    await shell.openPath(dir);
-  } catch {
-    // fallback
+  if (process.env.MCDEV_DEBUG) {
+    mainWindow.webContents.openDevTools();
   }
-});
+
+  // 拦截 _blank 链接在外部浏览器打开
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    shell.openExternal(url);
+    return { action: "deny" };
+  });
+}
 
 // ---------- lifecycle ----------
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  // Start HTTP server first, then create window
+  createServer(serveGui).listen(PORT, () => {
+    console.log(`GUI server: http://localhost:${PORT}`);
+    createWindow();
+  });
+});
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();

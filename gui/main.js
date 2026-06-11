@@ -4,70 +4,121 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const electron_1 = require("electron");
+const node_http_1 = require("node:http");
 const node_child_process_1 = require("node:child_process");
-const node_path_1 = __importDefault(require("node:path"));
 const node_fs_1 = __importDefault(require("node:fs"));
+const node_path_1 = __importDefault(require("node:path"));
+const PORT = 19089;
 let mainWindow = null;
+// ============ Minimal HTTP server for GUI ============
+function serveGui(req, res) {
+    const url = req.url === "/" ? "/index.html" : req.url ?? "/";
+    const guiDir = node_path_1.default.join(__dirname);
+    const filePath = node_path_1.default.join(guiDir, node_path_1.default.normalize(url).replace(/^\/+/, ""));
+    // API: run CLI generation
+    if (url === "/api/generate" && req.method === "POST") {
+        let body = "";
+        req.on("data", (chunk) => body += chunk);
+        req.on("end", () => {
+            res.writeHead(200, {
+                "Content-Type": "text/plain; charset=utf-8",
+                "Transfer-Encoding": "chunked",
+                "X-Content-Type-Options": "nosniff",
+            });
+            let args;
+            try {
+                args = JSON.parse(body).args;
+            }
+            catch {
+                args = [];
+            }
+            const projectRoot = node_path_1.default.resolve(__dirname, "..");
+            const child = (0, node_child_process_1.spawn)("npx", ["tsx", "src/index.ts", ...args], {
+                cwd: projectRoot,
+                env: { ...process.env, FORCE_COLOR: "0" },
+                stdio: ["ignore", "pipe", "pipe"],
+            });
+            const push = (data) => {
+                for (const line of data.toString("utf8").split("\n")) {
+                    if (line.trim())
+                        res.write(line.trim() + "\n");
+                }
+            };
+            child.stdout.on("data", push);
+            child.stderr.on("data", push);
+            child.on("close", () => res.end());
+            child.on("error", (err) => {
+                res.write(`ERROR: ${err.message}\n`);
+                res.end();
+            });
+        });
+        return;
+    }
+    // API: open directory picker
+    if (url === "/api/select-dir") {
+        electron_1.dialog.showOpenDialog(mainWindow, {
+            properties: ["openDirectory", "createDirectory"],
+            title: "选择模组项目输出目录",
+        }).then((result) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            if (result.canceled || result.filePaths.length === 0) {
+                res.end(JSON.stringify({ canceled: true }));
+            }
+            else {
+                res.end(JSON.stringify({ path: result.filePaths[0] }));
+            }
+        }).catch((err) => {
+            res.writeHead(500);
+            res.end(JSON.stringify({ error: err.message }));
+        });
+        return;
+    }
+    // Static file serving
+    if (!node_fs_1.default.existsSync(filePath)) {
+        res.writeHead(404);
+        res.end("404");
+        return;
+    }
+    const ext = node_path_1.default.extname(filePath);
+    const mime = {
+        ".html": "text/html; charset=utf-8",
+        ".js": "application/javascript; charset=utf-8",
+        ".css": "text/css; charset=utf-8",
+        ".json": "application/json",
+        ".png": "image/png",
+    };
+    res.writeHead(200, {
+        "Content-Type": mime[ext] ?? "text/plain",
+        "Cache-Control": "no-cache",
+    });
+    node_fs_1.default.createReadStream(filePath).pipe(res);
+}
 function createWindow() {
     mainWindow = new electron_1.BrowserWindow({
-        width: 720,
-        height: 620,
-        resizable: false,
+        width: 760,
+        height: 660,
+        resizable: true,
         title: "mcdev-wizard",
-        webPreferences: {
-            preload: node_path_1.default.join(__dirname, "preload.js"),
-            contextIsolation: true,
-            nodeIntegration: false,
-        },
         autoHideMenuBar: true,
     });
-    mainWindow.loadFile(node_path_1.default.join(__dirname, "index.html"));
+    mainWindow.loadURL(`http://localhost:${PORT}`);
+    if (process.env.MCDEV_DEBUG) {
+        mainWindow.webContents.openDevTools();
+    }
+    // 拦截 _blank 链接在外部浏览器打开
+    mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+        electron_1.shell.openExternal(url);
+        return { action: "deny" };
+    });
 }
-// ---------- IPC ----------
-electron_1.ipcMain.handle("gen:run", async (_event, args) => {
-    const projectRoot = node_path_1.default.resolve(__dirname, "..");
-    const child = (0, node_child_process_1.spawn)("npx", ["tsx", "src/index.ts", ...args], {
-        cwd: projectRoot,
-        env: { ...process.env, FORCE_COLOR: "0" },
-        stdio: ["ignore", "pipe", "pipe"],
-    });
-    return new Promise((resolve) => {
-        const lines = [];
-        const collect = (data) => {
-            for (const line of data.toString("utf8").split("\n")) {
-                const t = line.trim();
-                if (t) {
-                    lines.push(t);
-                    mainWindow?.webContents.send("gen:line", t);
-                }
-            }
-        };
-        child.stdout.on("data", collect);
-        child.stderr.on("data", collect);
-        child.on("close", () => resolve(lines));
-        child.on("error", (err) => {
-            lines.push(`错误：${err.message}`);
-            resolve(lines);
-        });
-    });
-});
-electron_1.ipcMain.handle("fs:write", async (_event, filePath, content) => {
-    await node_fs_1.default.promises.mkdir(node_path_1.default.dirname(filePath), { recursive: true });
-    await node_fs_1.default.promises.writeFile(filePath, content, "utf8");
-    return true;
-});
-electron_1.ipcMain.handle("fs:exists", async (_event, p) => node_fs_1.default.existsSync(p));
-electron_1.ipcMain.handle("app:open", async (_event, dir) => {
-    // 优先用 cursor，退化为 explorer
-    try {
-        await electron_1.shell.openPath(dir);
-    }
-    catch {
-        // fallback
-    }
-});
 // ---------- lifecycle ----------
-electron_1.app.whenReady().then(createWindow);
+electron_1.app.whenReady().then(() => {
+    // Start HTTP server first, then create window
+    (0, node_http_1.createServer)(serveGui).listen(PORT, () => {
+        console.log(`GUI server: http://localhost:${PORT}`);
+        createWindow();
+    });
+});
 electron_1.app.on("window-all-closed", () => {
     if (process.platform !== "darwin")
         electron_1.app.quit();

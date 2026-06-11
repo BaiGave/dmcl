@@ -3,11 +3,11 @@
     "target": "ES2022",
     "module": "commonjs",
     "outDir": ".",
-       "rootDir": ".",
+    "rootDir": ".",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "resolveJsonModule": true
   },
-  "files": ["main.ts", "preload.ts"]
+  "files": ["main.ts"]
 }

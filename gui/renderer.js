@@ -1,190 +1,255 @@
-// @ts-check
-/// <reference types="./preload" />
+/**
+ * mcdev-wizard GUI - 纯前端渲染层
+ * 通过 fetch POST /api/generate 调用后端 CLI
+ */
+(function () {
+  "use strict";
 
-const mcdev = window.mcdev;
+  var loaders = [
+    { id: "fabric", label: "Fabric", icon: "🧵", hint: "轻量、更新快，社区活跃" },
+    { id: "neoforge", label: "NeoForge", icon: "🦊", hint: "Forge 现代分支，1.20.1+" },
+    { id: "forge", label: "Forge", icon: "⚒️", hint: "老牌加载器，版本覆盖最全" },
+  ];
 
-// ============ state ============
-const loaders = [
-  { id: "fabric", label: "Fabric", icon: "🧵", hint: "轻量、更新快，社区活跃" },
-  { id: "neoforge", label: "NeoForge", icon: "🦊", hint: "Forge 现代分支，1.20.1+" },
-  { id: "forge", label: "Forge", icon: "⚒️", hint: "老牌加载器，版本覆盖最全" },
-];
+  var selectedLoader = "";
+  var selectedMc = "";
+  var selectedMappings = "";
+  var projectDir = "";
 
-const mappingsLabels = {
-  yarn: "Yarn（社区映射，默认）",
-  mojmap: "MojMap（官方映射）",
-  parchment: "Parchment（MojMap + 参数名）",
-};
+  function $(id) { return document.getElementById(id); }
 
-let selectedLoader = "";
-let selectedMc = "";
-let selectedMappings = "";
-let projectDir = "";
-
-// ============ DOM refs ============
-const $ = (id) => document.getElementById(id);
-const stepLoader = $("step-loader");
-const stepConfig = $("step-config");
-const stepGen = $("step-gen");
-const stepDone = $("step-done");
-const genLog = $("gen-log");
-
-function showStep(id) {
-  for (const el of document.querySelectorAll(".step")) {
-    el.classList.toggle("active", el.id === id);
-  }
-}
-
-// ============ Step 1: Loader ============
-const loaderCards = $("loader-cards");
-const loaderNext = $("loader-next");
-
-loaders.forEach((l) => {
-  const card = document.createElement("div");
-  card.className = "card";
-  card.dataset.loader = l.id;
-  card.innerHTML = `<div class="icon">${l.icon}</div><div class="label">${l.label}</div><div class="hint">${l.hint}</div>`;
-  card.addEventListener("click", () => {
-    document.querySelectorAll(".card").forEach((c) => c.classList.remove("selected"));
-    card.classList.add("selected");
-    selectedLoader = l.id;
-    loaderNext.disabled = false;
-  });
-  loaderCards.appendChild(card);
-});
-
-loaderNext.addEventListener("click", () => {
-  loadVersions(selectedLoader);
-  showStep("step-config");
-});
-
-// ============ Step 2: Config ============
-$("config-back").addEventListener("click", () => showStep("step-loader"));
-$("config-gen").addEventListener("click", startGeneration);
-
-async function loadVersions(loader) {
-  const sel = $("sel-mc");
-  sel.innerHTML = '<option>加载中…</option>';
-  sel.disabled = true;
-
-  try {
-    // Direct API calls to Mojang and Fabric for version listings
-    const releaseRes = await fetch(
-      "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
-    );
-    const releaseData = await releaseRes.json();
-    const releases = releaseData.versions
-      .filter((v) => v.type === "release")
-      .map((v) => v.id);
-
-    let versions = releases;
-    if (loader === "fabric") {
-      const fabRes = await fetch("https://meta.fabricmc.net/v2/versions/game");
-      const fabData = await fabRes.json();
-      const fabSet = new Set(fabData.filter((v) => v.stable).map((v) => v.version));
-      versions = releases.filter((v) => fabSet.has(v));
-    } else if (loader === "forge") {
-      // For Forge/NeoForge, we can't easily filter in the browser. Show all releases.
-      // The CLI will validate when generating.
-    } else if (loader === "neoforge") {
-      // Same - let CLI validate
+  function showStep(id) {
+    var all = document.querySelectorAll(".step");
+    for (var i = 0; i < all.length; i++) {
+      all[i].classList.toggle("active", all[i].id === id);
     }
-
-    sel.innerHTML = versions
-      .map((v, i) => `<option value="${v}">${v}${i === 0 ? "（最新）" : ""}</option>`)
-      .join("");
-    sel.selectedIndex = 0;
-    selectedMc = versions[0];
-
-    // Setup mappings
-    const mapSel = $("sel-mappings");
-    if (loader === "fabric") {
-      mapSel.innerHTML =
-        '<option value="yarn">Yarn（社区映射，默认）</option>' +
-        '<option value="mojmap">MojMap（官方映射）</option>' +
-        '<option value="parchment">Parchment（MojMap + 参数名）</option>';
-      selectedMappings = "yarn";
-    } else {
-      mapSel.innerHTML =
-        '<option value="mojmap">MojMap（官方映射，默认）</option>' +
-        '<option value="parchment">Parchment（MojMap + 参数名）</option>';
-      selectedMappings = "mojmap";
-    }
-  } catch (err) {
-    sel.innerHTML = '<option>加载失败，请检查网络</option>';
   }
-  sel.disabled = false;
-}
 
-$("sel-mc").addEventListener("change", () => {
-  selectedMc = $("sel-mc").value;
-});
-$("sel-mappings").addEventListener("change", () => {
-  selectedMappings = $("sel-mappings").value;
-});
+  function showError(msg) {
+    var box = $("error-box");
+    var txt = $("error-text");
+    if (txt) txt.textContent = msg;
+    if (box) box.style.display = "block";
+    console.error("[mcdev]", msg);
+  }
 
-// ============ Step 3: Generate ============
-$("gen-cancel").addEventListener("click", () => showStep("step-config"));
+  function hideError() {
+    var box = $("error-box");
+    if (box) box.style.display = "none";
+  }
 
-async function startGeneration() {
-  const modId = $("inp-modid").value.trim();
-  const name = $("inp-name").value.trim();
-  const group = $("inp-group").value.trim();
-  const dir = $("inp-dir").value.trim();
-  const mirror = $("chk-mirror").checked;
+  // ============ Step 1: Loader cards ============
+  var cardsContainer = $("loader-cards");
+  var btnNext = $("loader-next");
 
-  if (!/^[a-z][a-z0-9_]{1,63}$/.test(modId)) {
-    alert("模组 ID 需以小写字母开头，仅含小写字母、数字、下划线");
+  if (!cardsContainer || !btnNext) {
+    showError("初始化失败：页面元素未找到");
     return;
   }
 
-  showStep("step-gen");
-  genLog.innerHTML = "";
+  for (var i = 0; i < loaders.length; i++) {
+    (function (ldr) {
+      var c = document.createElement("div");
+      c.className = "card";
+      c.dataset.loader = ldr.id;
+      c.innerHTML =
+        '<div class="icon">' + ldr.icon + "</div>" +
+        '<div class="label">' + ldr.label + "</div>" +
+        '<div class="hint">' + ldr.hint + "</div>";
+      c.style.cursor = "pointer";
+      c.addEventListener("click", function () {
+        var all = document.querySelectorAll(".card");
+        for (var j = 0; j < all.length; j++) all[j].classList.remove("selected");
+        c.classList.add("selected");
+        selectedLoader = ldr.id;
+        btnNext.disabled = false;
+        hideError();
+      });
+      cardsContainer.appendChild(c);
+    })(loaders[i]);
+  }
 
-  const args = [
-    "--yes",
-    "--loader", selectedLoader,
-    "--mc", selectedMc,
-    "--modid", modId,
-    "--name", name,
-    "--group", group,
-    "--dir", dir,
-    "--mappings", selectedMappings,
-  ];
-  if (!mirror) args.push("--no-mirror");
-
-  // Start listening for progress
-  mcdev.onProgress((line) => {
-    const div = document.createElement("div");
-    if (line.includes("错误") || line.includes("失败") || line.includes("FAIL")) {
-      div.className = "err";
-    } else if (line.includes("成功") || line.includes("BUILD SUCCESS")) {
-      div.className = "ok";
-    }
-    div.textContent = line;
-    genLog.appendChild(div);
-    genLog.scrollTop = genLog.scrollHeight;
+  btnNext.addEventListener("click", function () {
+    if (!selectedLoader) { showError("请先选择一个模组加载器"); return; }
+    loadVersions(selectedLoader);
+    showStep("step-config");
   });
 
-  try {
-    await mcdev.generate(args);
-    // After generation, show done
+  // ============ Step 2: Config ============
+  var btnBack = $("config-back");
+  var btnGen = $("config-gen");
+  var btnBrowse = $("btn-browse");
+  if (btnBack) btnBack.addEventListener("click", function () { showStep("step-loader"); });
+  if (btnGen) btnGen.addEventListener("click", startGeneration);
+
+  // 浏览按钮：调 Electron 原生目录选择器
+  if (btnBrowse) {
+    btnBrowse.addEventListener("click", async function () {
+      try {
+        var resp = await fetch("/api/select-dir");
+        var data = await resp.json();
+        if (data.path) {
+          var inpDir = $("inp-dir");
+          if (inpDir) inpDir.value = data.path;
+        }
+      } catch (e) {
+        console.warn("目录选择器不可用（非 Electron 环境），请手动输入路径");
+      }
+    });
+  }
+
+  async function loadVersions(loader) {
+    var sel = $("sel-mc");
+    if (!sel) return;
+    sel.innerHTML = "<option>加载中…</option>";
+    sel.disabled = true;
+
+    try {
+      var res1 = await fetch("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json");
+      var data1 = await res1.json();
+      var releases = data1.versions.filter(function (v) { return v.type === "release"; }).map(function (v) { return v.id; });
+
+      var versions = releases;
+      if (loader === "fabric") {
+        try {
+          var res2 = await fetch("https://meta.fabricmc.net/v2/versions/game");
+          var data2 = await res2.json();
+          var fabSet = {};
+          for (var k = 0; k < data2.length; k++) {
+            if (data2[k].stable) fabSet[data2[k].version] = true;
+          }
+          versions = releases.filter(function (v) { return fabSet[v]; });
+        } catch (e) { /* show all releases */ }
+      }
+
+      sel.innerHTML = versions.map(function (v, idx) {
+        return '<option value="' + v + '">' + v + (idx === 0 ? "（最新）" : "") + "</option>";
+      }).join("");
+      sel.selectedIndex = 0;
+      selectedMc = versions[0] || "";
+
+      var mapSel = $("sel-mappings");
+      if (mapSel) {
+        mapSel.innerHTML = loader === "fabric"
+          ? '<option value="yarn">Yarn（社区映射，默认）</option>' +
+            '<option value="mojmap">MojMap（官方映射）</option>' +
+            '<option value="parchment">Parchment（MojMap + 参数名）</option>'
+          : '<option value="mojmap">MojMap（官方映射，默认）</option>' +
+            '<option value="parchment">Parchment（MojMap + 参数名）</option>';
+        selectedMappings = loader === "fabric" ? "yarn" : "mojmap";
+      }
+    } catch (err) {
+      sel.innerHTML = "<option>加载失败，请检查网络</option>";
+    }
+    sel.disabled = false;
+  }
+
+  var selMc = $("sel-mc");
+  var selMappings = $("sel-mappings");
+  if (selMc) selMc.addEventListener("change", function () { selectedMc = selMc.value; });
+  if (selMappings) selMappings.addEventListener("change", function () { selectedMappings = selMappings.value; });
+
+  // ============ Step 3: Generate ============
+  var genCancel = $("gen-cancel");
+  if (genCancel) genCancel.addEventListener("click", function () { showStep("step-config"); });
+
+  async function startGeneration() {
+    var inpModid = $("inp-modid");
+    var inpName = $("inp-name");
+    var inpGroup = $("inp-group");
+    var inpDir = $("inp-dir");
+    var chkMirror = $("chk-mirror");
+
+    if (!inpModid || !inpName || !inpGroup || !inpDir) {
+      showError("无法读取表单数据，请刷新页面重试");
+      return;
+    }
+
+    var modId = inpModid.value.trim();
+    var name = inpName.value.trim();
+    var group = inpGroup.value.trim();
+    var dir = inpDir.value.trim();
+    var mirror = chkMirror ? chkMirror.checked : true;
+
+    if (!/^[a-z][a-z0-9_]{1,63}$/.test(modId)) {
+      showError("模组 ID 需以小写字母开头，仅含小写字母、数字、下划线");
+      return;
+    }
+
+    showStep("step-gen");
+    var log = $("gen-log");
+    log.innerHTML = "";
+    log.style.color = "#c9d1d9";
+
+    var args = [
+      "--yes",
+      "--loader", selectedLoader,
+      "--mc", selectedMc,
+      "--modid", modId,
+      "--name", name,
+      "--group", group,
+      "--dir", dir,
+      "--mappings", selectedMappings,
+    ];
+    if (!mirror) args.push("--no-mirror");
+
+    try {
+      var resp = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ args: args }),
+      });
+
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+
+      var reader = resp.body.getReader();
+      var decoder = new TextDecoder("utf-8");
+      var buffer = "";
+
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        var { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        var lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (var li = 0; li < lines.length; li++) {
+          var line = lines[li].trim();
+          if (!line) continue;
+          var div = document.createElement("div");
+          if (line.indexOf("错误") >= 0 || line.indexOf("失败") >= 0 || line.indexOf("FAIL") >= 0) {
+            div.style.color = "#f85149";
+          } else if (line.indexOf("成功") >= 0 || line.indexOf("完成") >= 0) {
+            div.style.color = "#3fb950";
+          }
+          div.textContent = line;
+          log.appendChild(div);
+        }
+        log.scrollTop = log.scrollHeight;
+      }
+    } catch (err) {
+      var div = document.createElement("div");
+      div.style.color = "#f85149";
+      div.textContent = "生成失败：" + (err.message || String(err));
+      log.appendChild(div);
+      if (genCancel) genCancel.textContent = "返回修改";
+      return;
+    }
+
     projectDir = dir;
     $("done-path").textContent = dir;
     showStep("step-done");
-  } catch (err) {
-    const div = document.createElement("div");
-    div.className = "err";
-    div.textContent = String(err);
-    genLog.appendChild(div);
-    $("gen-cancel").textContent = "返回修改";
   }
-}
 
-// ============ Step 4: Done ============
-$("done-open").addEventListener("click", () => {
-  mcdev.openDir(projectDir);
-});
-$("done-restart").addEventListener("click", () => {
-  location.reload();
-});
+  // ============ Step 4: Done ============
+  var doneOpen = $("done-open");
+  var doneRestart = $("done-restart");
+  if (doneOpen) doneOpen.addEventListener("click", function () {
+    alert("项目已生成在：" + projectDir + "\n请在 Cursor 中手动打开该目录。");
+  });
+  if (doneRestart) doneRestart.addEventListener("click", function () { location.reload(); });
+
+  console.log("[mcdev] Renderer ready ✓");
+})();

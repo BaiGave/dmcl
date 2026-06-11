@@ -128,7 +128,10 @@
     </div>
     <div class="form-group">
       <label>输出目录</label>
-      <input id="inp-dir" placeholder="mymod" value="mymod">
+      <div style="display:flex;gap:8px;">
+        <input id="inp-dir" placeholder="选择或输入目录" value="mymod" style="flex:1;">
+        <button class="btn btn-secondary" id="btn-browse" type="button" style="padding:8px 16px;margin-top:0;">浏览…</button>
+      </div>
     </div>
     <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--dim);margin-bottom:4px;">
       <input type="checkbox" id="chk-mirror" checked> 使用国内镜像加速
