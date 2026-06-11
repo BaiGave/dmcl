@@ -248,7 +248,11 @@
   var doneRestart = $("done-restart");
   if (doneClose) {
     doneClose.addEventListener("click", function () {
-      window.close();
+      fetch("/api/close").then(function () {
+        window.close();
+      }).catch(function () {
+        window.close();
+      });
     });
   }
   if (doneRestart) {

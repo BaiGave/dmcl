@@ -51,6 +51,14 @@ function serveGui(req: IncomingMessage, res: ServerResponse): void {
     return;
   }
 
+  // API: close app window
+  if (url === "/api/close") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
+    if (mainWindow) mainWindow.close();
+    return;
+  }
+
   // API: open directory picker
   if (url === "/api/select-dir") {
     dialog.showOpenDialog(mainWindow!, {
