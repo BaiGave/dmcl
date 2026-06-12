@@ -3,7 +3,8 @@ import path from "node:path";
 import type { Logger } from "../types.js";
 
 const MIRRORS: Array<{ name: string; url: string }> = [
-  { name: "BMCLAPI", url: "https://bmclapi2.bangbang93.com/maven" },
+  // BMCLAPI 镜像 S3 后端频繁 403，已移除。
+  // 仅保留 Alibaba Maven 镜像。
   { name: "Alibaba", url: "https://maven.aliyun.com/repository/public" },
 ];
 
@@ -40,8 +41,8 @@ export async function injectMavenMirrors(targetDir: string, log: Logger): Promis
     );
   }
 
-  // 通用：第一个 repositories { 块注入
-  if (!/BMCLAPI/.test(content)) {
+  // 通用：第一个 repositories { 块注入（避免重复）
+  if (!content.includes("Alibaba")) {
     content = content.replace(
       /(repositories\s*\{)/,
       `$1\n${snippet}`,
@@ -49,7 +50,7 @@ export async function injectMavenMirrors(targetDir: string, log: Logger): Promis
   }
 
   await fs.promises.writeFile(settingsFile, content, "utf8");
-  log("Maven 仓库已切换至国内镜像（BMCLAPI + Alibaba）");
+  log("Maven 仓库已切换至国内镜像（Alibaba）");
 }
 
 /**
@@ -59,7 +60,7 @@ export async function injectBuildscriptMirrors(targetDir: string, log: Logger): 
   const buildFile = path.join(targetDir, "build.gradle");
   if (!fs.existsSync(buildFile)) return;
   let content = await fs.promises.readFile(buildFile, "utf8");
-  if (/BMCLAPI/.test(content)) return;
+  if (content.includes("Alibaba")) return;
 
   const snippet = MIRRORS.map(
     (m) => `        maven { url "${m.url}" }`,
