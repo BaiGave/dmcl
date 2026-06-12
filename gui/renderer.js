@@ -128,25 +128,97 @@
       sel.selectedIndex = 0;
       selectedMc = versions[0] || "";
 
-      var mapSel = $("sel-mappings");
-      if (mapSel) {
-        mapSel.innerHTML = loader === "fabric"
-          ? '<option value="yarn">Yarn（社区映射，默认）</option>' +
-            '<option value="mojmap">MojMap（官方映射）</option>' +
-            '<option value="parchment">Parchment（MojMap + 参数名）</option>'
-          : '<option value="mojmap">MojMap（官方映射，默认）</option>' +
-            '<option value="parchment">Parchment（MojMap + 参数名）</option>';
-        selectedMappings = loader === "fabric" ? "yarn" : "mojmap";
-      }
+      refreshMappings();
     } catch (err) {
       sel.innerHTML = "<option>加载失败，请检查网络</option>";
     }
     sel.disabled = false;
   }
 
+  /** 根据当前 loader + mc 版本查询哪些映射可用，动态更新下拉框 */
+  async function refreshMappings() {
+    var mapSel = $("sel-mappings");
+    if (!mapSel || !selectedMc || !selectedLoader) return;
+
+    mapSel.innerHTML = "<option>检查中…</option>";
+    mapSel.disabled = true;
+
+    var mc = selectedMc;
+    var loader = selectedLoader;
+
+    // 并行查询各映射的可用性
+    var results = {};
+    try {
+      var queries = [];
+
+      // MojMap：总是可用
+      queries.push(Promise.resolve({ key: "mojmap", ok: true }));
+
+      // Parchment：查 Maven metadata
+      queries.push(
+        fetch("https://maven.parchmentmc.org/org/parchmentmc/data/parchment-" + mc + "/maven-metadata.xml")
+          .then(function (r) { return r.ok ? r.text() : Promise.reject("http " + r.status); })
+          .then(function (xml) {
+            var m = xml.match(/<release>([^<]+)<\/release>/);
+            return { key: "parchment", ok: !!(m && m[1] && !m[1].endsWith("-SNAPSHOT")) };
+          })
+          .catch(function () { return { key: "parchment", ok: false }; })
+      );
+
+      // Yarn：仅 Fabric 查询
+      if (loader === "fabric") {
+        queries.push(
+          fetch("https://meta.fabricmc.net/v2/versions/yarn/" + mc)
+            .then(function (r) { return r.ok ? r.json() : Promise.reject("http " + r.status); })
+            .then(function (data) {
+              return { key: "yarn", ok: Array.isArray(data) && data.length > 0 };
+            })
+            .catch(function () { return { key: "yarn", ok: false }; })
+        );
+      }
+
+      var settled = await Promise.all(queries);
+      for (var i = 0; i < settled.length; i++) {
+        results[settled[i].key] = settled[i].ok;
+      }
+    } catch (e) {
+      // 全部失败时至少保证 MojMap 可用
+      results = { mojmap: true };
+    }
+
+    // 构建下拉框（只显示确认可用的映射）
+    // MojMap 总是可用；Yarn / Parchment 需运行时查询确认
+    var order = loader === "fabric"
+      ? ["yarn", "mojmap", "parchment"]
+      : ["mojmap", "parchment"];
+
+    var labels = {
+      yarn: "Yarn（社区映射）",
+      mojmap: "MojMap（官方映射）",
+      parchment: "Parchment（MojMap + 参数名）",
+    };
+
+    var options = [];
+    var defaultVal = "";
+    for (var j = 0; j < order.length; j++) {
+      var key = order[j];
+      if (!results[key]) continue;  // 不可用则不显示
+      options.push('<option value="' + key + '">' + labels[key] + "</option>");
+      if (!defaultVal) defaultVal = key;
+    }
+
+    mapSel.innerHTML = options.join("");
+    selectedMappings = defaultVal;
+    mapSel.value = defaultVal;
+    mapSel.disabled = false;
+  }
+
   var selMc = $("sel-mc");
   var selMappings = $("sel-mappings");
-  if (selMc) selMc.addEventListener("change", function () { selectedMc = selMc.value; });
+  if (selMc) selMc.addEventListener("change", function () {
+    selectedMc = selMc.value;
+    refreshMappings();
+  });
   if (selMappings) selMappings.addEventListener("change", function () { selectedMappings = selMappings.value; });
 
   // ============ Step 3: Generate ============
