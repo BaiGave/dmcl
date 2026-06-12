@@ -39,12 +39,19 @@ export async function scaffoldFabric(opts: ProjectOptions, log: Logger): Promise
 
   // 元数据查询失败不应中断生成：模板自带的版本号仍然可用
   log("查询 Fabric 各组件版本…");
-  const needYarn = opts.mappings === "yarn";
-  const [loaderVersion, yarnVersion, apiVersion] = await Promise.all([
+  const [loaderVersion, apiVersion] = await Promise.all([
     fetchFabricLoaderVersion().catch(() => null),
-    needYarn ? fetchYarnVersion(opts.mcVersion) : Promise.resolve(null),
     fetchFabricApiVersion(opts.mcVersion),
   ]);
+
+  let yarnVersion: string | null = null;
+  if (opts.mappings === "yarn") {
+    yarnVersion = await fetchYarnVersion(opts.mcVersion).catch(() => null);
+    if (!yarnVersion) {
+      log("⚠ 此版本暂无 Yarn 映射，切换至 MojMap");
+      opts.mappings = "mojmap"; // 后续 applyMappings 会据此设置 mappings_variant
+    }
+  }
 
   // 必须先做全局占位符替换，再补丁 properties，否则新写入的值会被二次替换
   log("替换模板占位符…");
@@ -55,9 +62,12 @@ export async function scaffoldFabric(opts: ProjectOptions, log: Logger): Promise
   });
 
   const gradleProps = path.join(opts.targetDir, "gradle.properties");
+  // 只有 Yarn 模式才需要写入 yarn_mappings（模板已有默认值，这里用最新获取的值覆盖）
+  // MojMap / Parchment 由 applyMappings 后续通过 mappings_variant 切换
+  const yarnKV = opts.mappings === "yarn" && yarnVersion ? { yarn_mappings: yarnVersion } : {};
   const patched = await patchProperties(gradleProps, {
     minecraft_version: opts.mcVersion,
-    yarn_mappings: needYarn ? yarnVersion : undefined,
+    ...yarnKV,
     loader_version: loaderVersion,
     // 不同分支的键名不同，两个都尝试
     fabric_version: apiVersion,
