@@ -1,39 +1,43 @@
 /**
- * DMCL GUI - 纯前端渲染层
- * 设计原则：用户只需 1) 选加载器 2) 起名字 3) 点一键创建。
- * 其他全部自动：modid/包名自动生成、版本默认最新、目录默认桌面、生成后自动构建验证。
+ * DMCL 工作台 — 模组列表、详情矩阵、变体构建、新建向导
  */
 (function () {
   "use strict";
 
-  var loaders = [
-    { id: "fabric", label: "Fabric", icon: "🧵", hint: "轻量、更新快（推荐新手）" },
-    { id: "neoforge", label: "NeoForge", icon: "🦊", hint: "Forge 现代分支，1.20.1+" },
-    { id: "forge", label: "Forge", icon: "⚒️", hint: "老牌加载器，版本覆盖最全" },
+  var LOADERS = [
+    { id: "fabric", label: "Fabric", icon: "🧵", hint: "轻量、更新快" },
+    { id: "neoforge", label: "NeoForge", icon: "🦊", hint: "Forge 现代分支" },
+    { id: "forge", label: "Forge", icon: "⚒️", hint: "老牌加载器" },
   ];
 
-  var selectedLoader = "";
-  var selectedMc = "";
-  var selectedMappings = "";
-  var projectDir = "";
-  var modidTouched = false;   // 用户手动改过 modid 后就不再自动生成
-  var groupTouched = false;
+  var LOADER_LABELS = { fabric: "Fabric", forge: "Forge", neoforge: "NeoForge" };
+  var STATUS_LABELS = { active: "开发中", paused: "暂停", released: "已发布" };
+
+  var state = {
+    mods: [],
+    currentModId: null,
+    filter: "all",
+    search: "",
+    selectedLoader: "",
+    selectedMc: "",
+    selectedMappings: "",
+    modidTouched: false,
+    groupTouched: false,
+    generationCancelled: false,
+    activeAbort: null,
+    nameComposing: false,
+    dirTouched: false,
+  };
+
+  var pathRefreshTimer = null;
 
   function $(id) { return document.getElementById(id); }
-
-  function showStep(id) {
-    var all = document.querySelectorAll(".step");
-    for (var i = 0; i < all.length; i++) {
-      all[i].classList.toggle("active", all[i].id === id);
-    }
-  }
 
   function showError(msg) {
     var box = $("error-box");
     var txt = $("error-text");
     if (txt) txt.textContent = msg;
     if (box) box.style.display = "block";
-    console.error("[dmcl]", msg);
   }
 
   function hideError() {
@@ -41,303 +45,661 @@
     if (box) box.style.display = "none";
   }
 
-  // ============ 自动生成 modid / 包名 ============
+  function showView(name) {
+    document.querySelectorAll(".view").forEach(function (v) {
+      v.classList.toggle("active", v.id === "view-" + name);
+    });
+    document.querySelectorAll(".nav-btn").forEach(function (b) {
+      b.classList.toggle("active", b.dataset.view === name);
+    });
+  }
 
-  /** 把任意名字转成合法 modid：小写、字母开头、只保留字母数字下划线 */
+  function api(path, opts) {
+    opts = opts || {};
+    return fetch(path, {
+      method: opts.method || "GET",
+      headers: opts.body ? { "Content-Type": "application/json" } : undefined,
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      signal: opts.signal,
+    }).then(function (r) {
+      if (opts.expectText) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r;
+      }
+      return r.json().then(function (data) {
+        if (!r.ok) throw new Error((data && data.error) || ("HTTP " + r.status));
+        return data;
+      });
+    });
+  }
+
+  // ============ 模组列表 ============
+
+  async function loadMods() {
+    try {
+      var data = await api("/api/mods");
+      state.mods = data.mods || [];
+      renderModList();
+    } catch (e) {
+      showError("加载模组列表失败：" + e.message);
+    }
+  }
+
+  function variantSummary(mod) {
+    return mod.variants.map(function (v) {
+      return LOADER_LABELS[v.loader] + " " + v.mcVersion;
+    }).join(" · ");
+  }
+
+  function buildHealth(mod) {
+    var total = mod.variants.length;
+    if (total === 0) return "无变体";
+    var ok = mod.variants.filter(function (v) { return v.buildStatus === "success"; }).length;
+    return ok + "/" + total + " 变体已构建";
+  }
+
+  function lastBuilt(mod) {
+    var times = mod.variants
+      .filter(function (v) { return v.lastBuiltAt; })
+      .map(function (v) { return new Date(v.lastBuiltAt).getTime(); });
+    if (!times.length) return "从未构建";
+    var latest = Math.max.apply(null, times);
+    var diff = Date.now() - latest;
+    if (diff < 3600000) return "上次构建 " + Math.round(diff / 60000) + " 分钟前";
+    if (diff < 86400000) return "上次构建 " + Math.round(diff / 3600000) + " 小时前";
+    return "上次构建 " + Math.round(diff / 86400000) + " 天前";
+  }
+
+  function renderModList() {
+    var grid = $("mod-grid");
+    var empty = $("empty-state");
+    if (!grid) return;
+
+    var filtered = state.mods.filter(function (m) {
+      if (state.filter !== "all" && m.status !== state.filter) return false;
+      if (state.search) {
+        var q = state.search.toLowerCase();
+        return m.displayName.toLowerCase().indexOf(q) >= 0 || m.modId.indexOf(q) >= 0;
+      }
+      return true;
+    });
+
+    grid.innerHTML = "";
+    if (!filtered.length) {
+      empty.style.display = "block";
+      return;
+    }
+    empty.style.display = "none";
+
+    filtered.forEach(function (mod) {
+      var card = document.createElement("div");
+      card.className = "mod-card";
+      card.innerHTML =
+        '<div class="mod-card-top">' +
+          '<div><h3>' + esc(mod.displayName) + '</h3>' +
+          '<div class="variants-summary">' + esc(variantSummary(mod) || "暂无变体") + '</div>' +
+          '<div class="meta">' + buildHealth(mod) + ' · ' + lastBuilt(mod) + '</div></div>' +
+          '<span class="badge badge-' + mod.status + '">' + STATUS_LABELS[mod.status] + '</span>' +
+        '</div>';
+      card.addEventListener("click", function () { openDetail(mod.id); });
+      grid.appendChild(card);
+    });
+  }
+
+  function esc(s) {
+    var d = document.createElement("div");
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  // ============ 模组详情 ============
+
+  async function openDetail(modId) {
+    state.currentModId = modId;
+    showView("detail");
+    await refreshDetail();
+  }
+
+  async function refreshDetail() {
+    var modId = state.currentModId;
+    if (!modId) return;
+
+    try {
+      var modData = await api("/api/mods/" + modId);
+      var mod = modData.mod;
+      var matrixData = await api("/api/mods/" + modId + "/matrix");
+
+      $("detail-name").textContent = mod.displayName;
+      $("detail-meta").innerHTML =
+        'modId: <span>' + esc(mod.modId) + '</span> · ' +
+        '状态: <span>' + STATUS_LABELS[mod.status] + '</span> · ' +
+        mod.variants.length + ' 个变体';
+
+      renderMatrix(mod, matrixData);
+      renderVariantList(mod);
+    } catch (e) {
+      showError("加载详情失败：" + e.message);
+    }
+  }
+
+  function cellLabel(status) {
+    if (status === "built") return "✅";
+    if (status === "failed") return "❌";
+    if (status === "building") return "🔨";
+    if (status === "exists") return "📁";
+    if (status === "available") return "➕";
+    return "—";
+  }
+
+  function renderMatrix(mod, matrix) {
+    var wrap = $("matrix-wrap");
+    var table = document.createElement("table");
+    table.className = "matrix";
+
+    var thead = document.createElement("thead");
+    var hr = document.createElement("tr");
+    hr.innerHTML = '<th class="row-head">加载器</th>';
+    matrix.versions.forEach(function (v) {
+      var th = document.createElement("th");
+      th.textContent = v;
+      hr.appendChild(th);
+    });
+    thead.appendChild(hr);
+    table.appendChild(thead);
+
+    var tbody = document.createElement("tbody");
+    matrix.loaders.forEach(function (ldr) {
+      var tr = document.createElement("tr");
+      var th = document.createElement("th");
+      th.className = "row-head";
+      th.textContent = ldr.label;
+      tr.appendChild(th);
+
+      matrix.versions.forEach(function (ver) {
+        var cell = matrix.cells.find(function (c) {
+          return c.loader === ldr.id && c.mcVersion === ver;
+        });
+        var td = document.createElement("td");
+        var status = cell ? cell.status : "unsupported";
+        td.className = "cell-" + status;
+        td.textContent = cellLabel(status);
+        td.title = ldr.label + " " + ver + " — " + status;
+
+        if (status === "built" || status === "failed" || status === "exists") {
+          td.addEventListener("click", function () {
+            scrollToVariant(cell.variantId);
+          });
+        } else if (status === "available") {
+          td.addEventListener("click", function () {
+            generateVariantFromMatrix(mod, ldr.id, ver);
+          });
+        }
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.innerHTML = "";
+    wrap.appendChild(table);
+  }
+
+  function scrollToVariant(variantId) {
+    var el = document.querySelector('[data-variant-id="' + variantId + '"]');
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  function pickSourceVariant(mod) {
+    if (!mod.variants.length) return null;
+    return mod.variants[0];
+  }
+
+  async function generateVariantFromMatrix(mod, loader, mc) {
+    var source = pickSourceVariant(mod);
+    if (!source) {
+      showError("请先有至少一个变体作为源码来源");
+      return;
+    }
+
+    if (!confirm("将从 " + LOADER_LABELS[source.loader] + " " + source.mcVersion +
+        " 复制源码，生成 " + LOADER_LABELS[loader] + " " + mc + " 变体并加入构建队列？")) {
+      return;
+    }
+
+    hideError();
+    showModal("生成变体", "正在生成…");
+
+    try {
+      var resp = await fetch("/api/mods/" + mod.id + "/variants", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceVariantId: source.id,
+          targetLoader: loader,
+          targetMc: mc,
+          autoBuild: true,
+        }),
+      });
+
+      var reader = resp.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = "";
+      var log = $("modal-log");
+      log.innerHTML = "";
+
+      var exitCode = 0;
+      while (true) {
+        var result = await reader.read();
+        if (result.done) break;
+        buffer += decoder.decode(result.value, { stream: true });
+        var lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        lines.forEach(function (line) {
+          if (!line.trim()) return;
+          if (line.indexOf("__EXIT__:") === 0) {
+            exitCode = parseInt(line.slice(9), 10);
+            return;
+          }
+          if (line.indexOf("__") === 0) return;
+          var div = document.createElement("div");
+          div.textContent = line;
+          log.appendChild(div);
+        });
+        log.scrollTop = log.scrollHeight;
+      }
+
+      if (exitCode !== 0) throw new Error("生成失败（退出码 " + exitCode + "）");
+
+      await loadMods();
+      await refreshDetail();
+      updateQueueBar();
+    } catch (e) {
+      showError("生成变体失败：" + e.message);
+    }
+  }
+
+  function renderVariantList(mod) {
+    var list = $("variant-list");
+    list.innerHTML = "";
+
+    if (!mod.variants.length) {
+      list.innerHTML = '<div class="empty-state" style="padding:24px">暂无变体，在矩阵中点击 ➕ 生成</div>';
+      return;
+    }
+
+    mod.variants.forEach(function (v) {
+      var item = document.createElement("div");
+      item.className = "variant-item";
+      item.dataset.variantId = v.id;
+
+      var statusText = v.pathMissing ? "⚠️ 项目目录不存在"
+        : v.buildStatus === "success" ? "✅ 构建成功"
+        : v.buildStatus === "failed" ? "❌ 构建失败"
+        : v.buildStatus === "building" ? "🔨 构建中" : "未构建";
+
+      var missingBtn = v.pathMissing
+        ? '<button class="btn btn-primary btn-sm" data-action="relocate">重新定位</button>'
+        : "";
+
+      item.innerHTML =
+        '<div class="variant-item-header">' +
+          '<div><h4>' + LOADER_LABELS[v.loader] + ' ' + esc(v.mcVersion) + ' · v' + esc(v.modVersion) + '</h4>' +
+          '<div class="path">' + esc(v.projectPath) + '</div>' +
+          '<div style="font-size:12px;color:var(--text-muted);margin-top:4px">' + statusText + '</div></div>' +
+        '</div>' +
+        '<div class="variant-actions">' +
+          '<button class="btn btn-primary btn-sm" data-action="build">构建</button>' +
+          '<button class="btn btn-secondary btn-sm" data-action="run">启动客户端</button>' +
+          '<button class="btn btn-secondary btn-sm" data-action="folder">打开文件夹</button>' +
+          '<button class="btn btn-secondary btn-sm" data-action="cursor">Cursor 打开</button>' +
+          '<button class="btn btn-secondary btn-sm" data-action="logs">查看日志</button>' +
+          missingBtn +
+          '<button class="btn btn-danger btn-sm" data-action="remove">移除</button>' +
+        '</div>';
+
+      item.querySelectorAll("[data-action]").forEach(function (btn) {
+        btn.addEventListener("click", function (e) {
+          e.stopPropagation();
+          variantAction(mod.id, v, btn.dataset.action);
+        });
+      });
+      list.appendChild(item);
+    });
+  }
+
+  async function variantAction(modId, variant, action) {
+    if (action === "build") {
+      await api("/api/variants/" + variant.id + "/build", { method: "POST", body: { runClient: false } });
+      updateQueueBar();
+      await refreshDetail();
+    } else if (action === "run") {
+      await api("/api/variants/" + variant.id + "/run", { method: "POST" });
+      updateQueueBar();
+    } else if (action === "folder") {
+      await api("/api/open-folder", { method: "POST", body: { path: variant.projectPath } });
+    } else if (action === "cursor") {
+      await api("/api/open-cursor", { method: "POST", body: { path: variant.projectPath } });
+    } else if (action === "logs") {
+      var logs = await api("/api/variants/" + variant.id + "/logs");
+      if (!logs.logs || !logs.logs.length) {
+        showModal("构建日志", "暂无日志");
+        return;
+      }
+      var content = await api("/api/logs?path=" + encodeURIComponent(logs.logs[0].path));
+      showModal("构建日志 — " + logs.logs[0].name, content.content || "(空)");
+    } else if (action === "relocate") {
+      var pick = await api("/api/select-dir");
+      if (!pick.path) return;
+      try {
+        await api("/api/variants/" + variant.id + "/path", {
+          method: "PATCH",
+          body: { path: pick.path },
+        });
+        await loadMods();
+        await refreshDetail();
+      } catch (e) {
+        showError("重新定位失败：请选择包含 gradlew 的有效 mod 项目目录");
+      }
+    } else if (action === "remove") {
+      if (!confirm("从工作台移除此变体（不删磁盘文件），且不会被自动扫描重新导入。确定？")) return;
+      try {
+        await api("/api/mods/" + modId + "/variants/" + variant.id, { method: "DELETE" });
+        await loadMods();
+        if (state.currentModId === modId) {
+          var still = state.mods.find(function (m) { return m.id === modId; });
+          if (still) await refreshDetail();
+          else { state.currentModId = null; showView("list"); }
+        }
+        hideError();
+      } catch (e) {
+        showError("移除失败：" + e.message);
+      }
+    }
+  }
+
+  // ============ 构建队列 ============
+
+  async function updateQueueBar() {
+    var bar = $("queue-bar");
+    var data = await api("/api/queue");
+    if (data.running || data.pending > 0) {
+      bar.classList.add("visible");
+      $("queue-text").textContent = data.running
+        ? "正在构建… 队列剩余 " + data.pending + " 项"
+        : "队列等待中 " + data.pending + " 项";
+    } else {
+      bar.classList.remove("visible");
+    }
+  }
+
+  if (window.dmclBridge) {
+    window.dmclBridge.onBuildEvent(function (event) {
+      updateQueueBar();
+      if (event.type === "done" && state.currentModId) {
+        refreshDetail();
+        loadMods();
+      }
+      if (event.type === "progress" && $("modal-overlay").classList.contains("visible")) {
+        var log = $("modal-log");
+        if (log && event.line) {
+          var div = document.createElement("div");
+          div.textContent = event.line;
+          log.appendChild(div);
+          log.scrollTop = log.scrollHeight;
+        }
+      }
+    });
+  }
+
+  setInterval(updateQueueBar, 5000);
+
+  // ============ 新建向导 ============
+
   function nameToModId(name) {
     var s = name.toLowerCase()
-      .replace(/[\u4e00-\u9fa5]+/g, "")        // 去掉中文（拼音转换太复杂，直接去掉）
+      .replace(/[\u4e00-\u9fa5]+/g, "")
       .replace(/[^a-z0-9_]+/g, "_")
       .replace(/^_+|_+$/g, "")
       .replace(/_{2,}/g, "_");
     if (!s || !/^[a-z]/.test(s)) s = "mod" + (s || "");
     s = s.slice(0, 32);
     if (!/^[a-z][a-z0-9_]*$/.test(s)) s = "mymod";
-    if (s.length < 2) s = s + "mod";
     return s;
   }
 
-  function autoFill() {
-    var name = $("inp-name").value.trim();
-    if (!modidTouched) {
-      var mid = name ? nameToModId(name) : "";
-      $("inp-modid").value = mid;
+  function schedulePathRefresh() {
+    if (state.dirTouched) return;
+    clearTimeout(pathRefreshTimer);
+    pathRefreshTimer = setTimeout(function () {
+      refreshDefaultProjectPath();
+    }, 200);
+  }
+
+  function onDisplayNameChanged() {
+    if (!state.modidTouched) {
+      var name = $("inp-name").value.trim();
+      $("inp-modid").value = name ? nameToModId(name) : "";
     }
-    if (!groupTouched) {
+    if (!state.groupTouched) {
       var m = $("inp-modid").value.trim() || "mymod";
       $("inp-group").value = "com.example." + m.replace(/_/g, "");
     }
     updateDirPreview();
+    schedulePathRefresh();
+  }
+
+  function resetCreateWizard() {
+    state.modidTouched = false;
+    state.groupTouched = false;
+    state.dirTouched = false;
+    state.nameComposing = false;
+    state.selectedLoader = "";
+    clearTimeout(pathRefreshTimer);
+
+    var nameEl = $("inp-name");
+    if (nameEl) {
+      nameEl.value = "";
+      nameEl.readOnly = false;
+      nameEl.disabled = false;
+    }
+    if ($("inp-modid")) $("inp-modid").value = "";
+    if ($("inp-group")) $("inp-group").value = "";
+    if ($("inp-dir")) $("inp-dir").value = "";
+    if ($("dir-preview")) $("dir-preview").textContent = "";
+
+    document.querySelectorAll("#loader-cards .card").forEach(function (c) {
+      c.classList.remove("selected");
+    });
+    var btnNext = $("loader-next");
+    if (btnNext) btnNext.disabled = true;
   }
 
   function updateDirPreview() {
     var el = $("dir-preview");
-    if (!el) return;
-    var mId = $("inp-modid").value.trim();
-    var pDir = $("inp-dir").value.trim().replace(/[\\/]+$/, "");
-    if (!pDir) {
-      el.textContent = "";
+    var full = $("inp-dir").value.trim();
+    if (!full) {
+      el.textContent = "结构：dcml/projects/{modId}/{loader}-{版本}/";
       return;
     }
-    el.textContent = "项目将创建在: " + pDir + "\\" + (mId || "…");
+    el.textContent = "将创建在: " + full;
   }
 
-  // ============ Step 1: Loader cards ============
-  var cardsContainer = $("loader-cards");
-  var btnNext = $("loader-next");
-
-  if (!cardsContainer || !btnNext) {
-    showError("初始化失败：页面元素未找到");
-    return;
+  async function refreshDefaultProjectPath() {
+    if (state.dirTouched) return;
+    var modId = ($("inp-modid").value.trim() || "mymod");
+    if (!state.selectedLoader || !state.selectedMc) return;
+    try {
+      var q = "/api/paths/default-variant?modId=" + encodeURIComponent(modId) +
+        "&loader=" + encodeURIComponent(state.selectedLoader) +
+        "&mc=" + encodeURIComponent(state.selectedMc);
+      var data = await api(q);
+      if (data.path && !state.dirTouched) {
+        $("inp-dir").value = data.path;
+        updateDirPreview();
+      }
+    } catch (e) { /* ignore */ }
   }
 
-  for (var i = 0; i < loaders.length; i++) {
-    (function (ldr) {
+  function showCreateStep(step) {
+    ["step-loader", "step-config", "step-gen"].forEach(function (id) {
+      var el = $(id);
+      if (!el) return;
+      var show = id === step;
+      el.style.display = show ? "block" : "none";
+      el.setAttribute("aria-hidden", show ? "false" : "true");
+    });
+  }
+
+  function initCreateWizard() {
+    var cardsContainer = $("loader-cards");
+    var btnNext = $("loader-next");
+    cardsContainer.innerHTML = "";
+
+    LOADERS.forEach(function (ldr) {
       var c = document.createElement("div");
       c.className = "card";
-      c.dataset.loader = ldr.id;
-      c.innerHTML =
-        '<div class="icon">' + ldr.icon + "</div>" +
-        '<div class="label">' + ldr.label + "</div>" +
-        '<div class="hint">' + ldr.hint + "</div>";
-      c.style.cursor = "pointer";
+      c.innerHTML = '<div class="icon">' + ldr.icon + '</div><div class="label">' + ldr.label + '</div><div class="hint">' + ldr.hint + '</div>';
       c.addEventListener("click", function () {
-        var all = document.querySelectorAll(".card");
-        for (var j = 0; j < all.length; j++) all[j].classList.remove("selected");
+        document.querySelectorAll(".card").forEach(function (x) { x.classList.remove("selected"); });
         c.classList.add("selected");
-        selectedLoader = ldr.id;
+        state.selectedLoader = ldr.id;
         btnNext.disabled = false;
         hideError();
       });
       cardsContainer.appendChild(c);
-    })(loaders[i]);
-  }
+    });
 
-  btnNext.addEventListener("click", function () {
-    if (!selectedLoader) { showError("请先选择一个模组加载器"); return; }
-    loadVersions(selectedLoader);
-    loadDefaultDir();
-    showStep("step-config");
-  });
+    btnNext.addEventListener("click", function () {
+      if (!state.selectedLoader) return;
+      showCreateStep("step-config");
+      loadVersions(state.selectedLoader).then(function () {
+        refreshDefaultProjectPath();
+        var nameEl = $("inp-name");
+        if (nameEl) nameEl.focus();
+      });
+    });
 
-  // ============ Step 2: Config ============
-  var btnBack = $("config-back");
-  var btnGen = $("config-gen");
-  var btnBrowse = $("btn-browse");
-  if (btnBack) btnBack.addEventListener("click", function () { showStep("step-loader"); });
-  if (btnGen) btnGen.addEventListener("click", startGeneration);
+    $("config-back").addEventListener("click", function () { showCreateStep("step-loader"); });
+    $("config-gen").addEventListener("click", startGeneration);
 
-  // 名字 → 自动生成 modid / 包名
-  $("inp-name").addEventListener("input", autoFill);
-  $("inp-modid").addEventListener("input", function () {
-    modidTouched = true;
-    if (!groupTouched) {
-      var m = $("inp-modid").value.trim() || "mymod";
-      $("inp-group").value = "com.example." + m.replace(/_/g, "");
+    var nameEl = $("inp-name");
+    if (nameEl) {
+      nameEl.addEventListener("compositionstart", function () {
+        state.nameComposing = true;
+      });
+      nameEl.addEventListener("compositionend", function () {
+        state.nameComposing = false;
+        onDisplayNameChanged();
+      });
+      nameEl.addEventListener("input", function () {
+        if (!state.nameComposing) onDisplayNameChanged();
+      });
     }
-    updateDirPreview();
-  });
-  $("inp-group").addEventListener("input", function () { groupTouched = true; });
-  $("inp-dir").addEventListener("input", updateDirPreview);
 
-  // 默认目录：桌面
-  async function loadDefaultDir() {
-    var inp = $("inp-dir");
-    if (inp.value.trim()) return; // 已有值不覆盖
-    try {
-      var resp = await fetch("/api/default-dir");
-      var data = await resp.json();
+    $("inp-modid").addEventListener("input", function () {
+      state.modidTouched = true;
+      if (!state.groupTouched) {
+        var m = $("inp-modid").value.trim() || "mymod";
+        $("inp-group").value = "com.example." + m.replace(/_/g, "");
+      }
+      updateDirPreview();
+      schedulePathRefresh();
+    });
+    $("inp-group").addEventListener("input", function () { state.groupTouched = true; });
+    $("inp-dir").addEventListener("input", function () {
+      state.dirTouched = true;
+      updateDirPreview();
+    });
+    $("btn-browse").addEventListener("click", async function () {
+      var data = await api("/api/select-dir");
       if (data.path) {
-        inp.value = data.path;
+        state.dirTouched = true;
+        $("inp-dir").value = data.path;
         updateDirPreview();
       }
-    } catch (e) {
-      inp.placeholder = "请输入或浏览选择文件夹";
-    }
+    });
+    $("sel-mc").addEventListener("change", function () {
+      state.selectedMc = $("sel-mc").value;
+      refreshMappings();
+      refreshDefaultProjectPath();
+    });
+    $("sel-mappings").addEventListener("change", function () {
+      state.selectedMappings = $("sel-mappings").value;
+    });
+    $("gen-cancel").addEventListener("click", function () {
+      state.generationCancelled = true;
+      if (state.activeAbort) state.activeAbort.abort();
+      fetch("/api/cancel").catch(function () {});
+      showCreateStep("step-config");
+    });
   }
 
-  // 浏览按钮：调 Electron 原生目录选择器
-  if (btnBrowse) {
-    btnBrowse.addEventListener("click", async function () {
-      try {
-        var resp = await fetch("/api/select-dir");
-        var data = await resp.json();
-        if (data.path) {
-          $("inp-dir").value = data.path;
-          updateDirPreview();
-        }
-      } catch (e) {
-        console.warn("目录选择器不可用，请手动输入路径");
-      }
-    });
+  async function loadDefaultDir() {
+    await refreshDefaultProjectPath();
   }
 
   async function loadVersions(loader) {
     var sel = $("sel-mc");
-    if (!sel) return;
     sel.innerHTML = "<option>加载中…</option>";
     sel.disabled = true;
-
     try {
-      var res1 = await fetch("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json");
-      var data1 = await res1.json();
-      var releases = data1.versions.filter(function (v) { return v.type === "release"; }).map(function (v) { return v.id; });
-
-      var versions = releases;
-      if (loader === "fabric") {
-        try {
-          var res2 = await fetch("https://meta.fabricmc.net/v2/versions/game");
-          var data2 = await res2.json();
-          var fabSet = {};
-          for (var k = 0; k < data2.length; k++) {
-            if (data2[k].stable) fabSet[data2[k].version] = true;
-          }
-          versions = releases.filter(function (v) { return fabSet[v]; });
-        } catch (e) { /* show all releases */ }
-      }
-
-      sel.innerHTML = versions.map(function (v, idx) {
-        return '<option value="' + v + '">' + v + (idx === 0 ? "（最新）" : "") + "</option>";
+      var data = await api("/api/versions/" + loader);
+      var versions = data.versions || [];
+      sel.innerHTML = versions.map(function (v, i) {
+        return '<option value="' + v + '">' + v + (i === 0 ? "（最新）" : "") + '</option>';
       }).join("");
-      sel.selectedIndex = 0;
-      selectedMc = versions[0] || "";
-
-      refreshMappings();
-    } catch (err) {
-      sel.innerHTML = "<option>加载失败，请检查网络后点返回重试</option>";
+      state.selectedMc = versions[0] || "";
+      await refreshMappings();
+    } catch (e) {
+      sel.innerHTML = "<option>加载失败</option>";
     }
     sel.disabled = false;
   }
 
-  /** 根据当前 loader + mc 版本查询哪些映射可用，动态更新下拉框 */
   async function refreshMappings() {
     var mapSel = $("sel-mappings");
-    if (!mapSel || !selectedMc || !selectedLoader) return;
-
+    if (!state.selectedMc || !state.selectedLoader) return;
     mapSel.innerHTML = "<option>检查中…</option>";
-    mapSel.disabled = true;
-
-    var mc = selectedMc;
-    var loader = selectedLoader;
-
-    var results = {};
+    var loader = state.selectedLoader;
+    var mc = state.selectedMc;
+    var results = { mojmap: true };
     try {
-      var queries = [];
-
-      queries.push(Promise.resolve({ key: "mojmap", ok: true }));
-
-      queries.push(
-        fetch("https://maven.parchmentmc.org/org/parchmentmc/data/parchment-" + mc + "/maven-metadata.xml")
-          .then(function (r) { return r.ok ? r.text() : Promise.reject("http " + r.status); })
-          .then(function (xml) {
-            var m = xml.match(/<release>([^<]+)<\/release>/);
-            return { key: "parchment", ok: !!(m && m[1] && !m[1].endsWith("-SNAPSHOT")) };
-          })
-          .catch(function () { return { key: "parchment", ok: false }; })
-      );
-
+      var parchment = await fetch("https://maven.parchmentmc.org/org/parchmentmc/data/parchment-" + mc + "/maven-metadata.xml");
+      results.parchment = parchment.ok;
       if (loader === "fabric") {
-        queries.push(
-          fetch("https://meta.fabricmc.net/v2/versions/yarn/" + mc)
-            .then(function (r) { return r.ok ? r.json() : Promise.reject("http " + r.status); })
-            .then(function (data) {
-              return { key: "yarn", ok: Array.isArray(data) && data.length > 0 };
-            })
-            .catch(function () { return { key: "yarn", ok: false }; })
-        );
+        var yarn = await fetch("https://meta.fabricmc.net/v2/versions/yarn/" + mc);
+        results.yarn = yarn.ok;
       }
-
-      var settled = await Promise.all(queries);
-      for (var i = 0; i < settled.length; i++) {
-        results[settled[i].key] = settled[i].ok;
-      }
-    } catch (e) {
-      results = { mojmap: true };
-    }
-
-    var order = loader === "fabric"
-      ? ["yarn", "mojmap", "parchment"]
-      : ["mojmap", "parchment"];
-
-    var labels = {
-      yarn: "Yarn（社区映射）",
-      mojmap: "MojMap（官方映射）",
-      parchment: "Parchment（MojMap + 参数名）",
-    };
-
-    var options = [];
-    var defaultVal = "";
-    for (var j = 0; j < order.length; j++) {
-      var key = order[j];
-      if (!results[key]) continue;
-      options.push('<option value="' + key + '">' + labels[key] + "</option>");
-      if (!defaultVal) defaultVal = key;
-    }
-
-    mapSel.innerHTML = options.join("");
-    selectedMappings = defaultVal;
-    mapSel.value = defaultVal;
-    mapSel.disabled = false;
+    } catch (e) { /* ignore */ }
+    var order = loader === "fabric" ? ["yarn", "mojmap", "parchment"] : ["mojmap", "parchment"];
+    var labels = { yarn: "Yarn", mojmap: "MojMap", parchment: "Parchment" };
+    var html = "";
+    var def = "";
+    order.forEach(function (k) {
+      if (!results[k]) return;
+      html += '<option value="' + k + '">' + labels[k] + '</option>';
+      if (!def) def = k;
+    });
+    mapSel.innerHTML = html;
+    state.selectedMappings = def;
+    mapSel.value = def;
   }
 
-  var selMc = $("sel-mc");
-  var selMappings = $("sel-mappings");
-  if (selMc) selMc.addEventListener("change", function () {
-    selectedMc = selMc.value;
-    refreshMappings();
-  });
-  if (selMappings) selMappings.addEventListener("change", function () { selectedMappings = selMappings.value; });
-
-  // ============ Step 3: Generate + Build ============
-  var genCancel = $("gen-cancel");
-  var activeAbort = null;
-  var generationCancelled = false;
-
-  if (genCancel) genCancel.addEventListener("click", function () {
-    generationCancelled = true;
-    if (activeAbort) activeAbort.abort();
-    fetch("/api/cancel").catch(function () {});
-    genCancel.textContent = "取消";
-    showStep("step-config");
-  });
-
   function setPhase(phase) {
-    // phase: "gen" | "build" | "client" | "done"
-    var pg = $("phase-gen"), pb = $("phase-build"), pc = $("phase-client"), pd = $("phase-done");
-    pg.classList.remove("active", "done");
-    pb.classList.remove("active", "done");
-    if (pc) pc.classList.remove("active", "done");
-    pd.classList.remove("active", "done");
-
-    if (phase === "gen") {
-      pg.classList.add("active");
-      pg.innerHTML = '<span class="spinner"></span>创建项目';
-      pb.innerHTML = "验证构建";
-      if (pc) pc.innerHTML = "启动客户端";
-      $("gen-hint").textContent = "正在下载模板并生成项目，大约 10~30 秒…";
-    } else if (phase === "build") {
-      pg.classList.add("done");
-      pg.innerHTML = "✓ 创建项目";
-      pb.classList.add("active");
-      pb.innerHTML = '<span class="spinner"></span>验证构建';
-      if (pc) pc.innerHTML = "启动客户端";
-      $("gen-hint").textContent = "正在验证构建（首次要下载 Minecraft，约 5~20 分钟，可以去喝杯水）…";
+    var phases = ["phase-gen", "phase-build", "phase-client", "phase-done"];
+    phases.forEach(function (id) {
+      var el = $(id);
+      el.classList.remove("active", "done");
+    });
+    if (phase === "gen") $("phase-gen").classList.add("active");
+    else if (phase === "build") {
+      $("phase-gen").classList.add("done");
+      $("phase-build").classList.add("active");
     } else if (phase === "client") {
-      pg.classList.add("done");
-      pg.innerHTML = "✓ 创建项目";
-      pb.classList.add("done");
-      pb.innerHTML = "✓ 验证构建";
-      if (pc) pc.classList.add("active");
-      if (pc) pc.innerHTML = '<span class="spinner"></span>启动客户端';
-      $("gen-hint").textContent = "正在启动 Minecraft 客户端（会弹出游戏窗口，加载成功后自动关闭）…";
+      $("phase-gen").classList.add("done");
+      $("phase-build").classList.add("done");
+      $("phase-client").classList.add("active");
     } else if (phase === "done") {
-      pg.classList.add("done");
-      pg.innerHTML = "✓ 创建项目";
-      pb.classList.add("done");
-      pb.innerHTML = "✓ 验证构建";
-      if (pc) pc.classList.add("done");
-      if (pc) pc.innerHTML = "✓ 启动客户端";
-      pd.classList.add("done");
+      phases.forEach(function (id) { $(id).classList.add("done"); });
     }
   }
 
@@ -345,42 +707,24 @@
     var name = $("inp-name").value.trim();
     var modId = $("inp-modid").value.trim();
     var group = $("inp-group").value.trim();
-    var parentDir = $("inp-dir").value.trim().replace(/[\\/]+$/, "");
-    var mirror = $("chk-mirror") ? $("chk-mirror").checked : true;
+    var mirror = $("chk-mirror").checked;
+    var dir = $("inp-dir").value.trim();
 
-    // 防呆校验，给出具体可操作的提示
     if (!name) { showError("请给模组起个名字"); return; }
     if (!modId) { modId = nameToModId(name); $("inp-modid").value = modId; }
-    if (!/^[a-z][a-z0-9_]{1,63}$/.test(modId)) {
-      showError("模组 ID 不合法（需小写字母开头，仅含小写字母/数字/下划线）。点开「高级选项」修改，或改个英文名字自动生成");
-      return;
-    }
-    if (!group) { group = "com.example." + modId.replace(/_/g, ""); $("inp-group").value = group; }
-    if (!parentDir) { showError("请选择项目保存位置"); return; }
-    if (!selectedMc) { showError("Minecraft 版本还没加载出来，请稍等或点返回重试"); return; }
+    if (!dir) { showError("项目路径未设置"); return; }
     hideError();
-
-    // 项目实际目录 = 父目录 + modid 子文件夹
-    var dir = parentDir + "\\" + modId;
-    projectDir = dir;
-
-    showStep("step-gen");
+    showCreateStep("step-gen");
     setPhase("gen");
-    generationCancelled = false;
-    activeAbort = new AbortController();
-    if (genCancel) genCancel.textContent = "取消";
+    state.generationCancelled = false;
+    state.activeAbort = new AbortController();
     var log = $("gen-log");
     log.innerHTML = "";
 
     var args = [
-      "--yes",
-      "--loader", selectedLoader,
-      "--mc", selectedMc,
-      "--modid", modId,
-      "--name", name || modId,
-      "--group", group,
-      "--dir", dir,
-      "--mappings", selectedMappings || "mojmap",
+      "--yes", "--loader", state.selectedLoader, "--mc", state.selectedMc,
+      "--modid", modId, "--name", name, "--group", group, "--dir", dir,
+      "--mappings", state.selectedMappings || "mojmap",
     ];
     if (!mirror) args.push("--no-mirror");
 
@@ -389,93 +733,368 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ args: args }),
-        signal: activeAbort.signal,
+        signal: state.activeAbort.signal,
       });
 
-      if (!resp.ok) throw new Error("HTTP " + resp.status);
-
       var reader = resp.body.getReader();
-      var decoder = new TextDecoder("utf-8");
+      var decoder = new TextDecoder();
       var buffer = "";
       var exitCode = null;
 
-      // eslint-disable-next-line no-constant-condition
       while (true) {
-        if (generationCancelled) return;
-        var { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
+        if (state.generationCancelled) return;
+        var chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
         var lines = buffer.split("\n");
         buffer = lines.pop() || "";
-
-        for (var li = 0; li < lines.length; li++) {
-          var line = lines[li].trim();
-          if (!line) continue;
+        lines.forEach(function (line) {
+          line = line.trim();
+          if (!line) return;
           if (line.indexOf("__EXIT__:") === 0) {
-            exitCode = parseInt(line.slice("__EXIT__:".length), 10);
-            continue;
+            exitCode = parseInt(line.slice(9), 10);
+            return;
           }
-          // 检测到各阶段开始，切换进度条
-          if (line.indexOf("正在验证构建") >= 0) {
-            setPhase("build");
-          } else if (line.indexOf("正在启动 Minecraft") >= 0) {
-            setPhase("client");
-          }
+          if (line.indexOf("正在验证构建") >= 0) setPhase("build");
+          if (line.indexOf("正在启动 Minecraft") >= 0) setPhase("client");
           var div = document.createElement("div");
-          if (line.indexOf("错误") >= 0 || line.indexOf("失败") >= 0 || line.indexOf("FAIL") >= 0 || line.indexOf("ERROR") >= 0 || line.indexOf("崩溃") >= 0) {
-            div.className = "log-err";
-          } else if (line.indexOf("成功") >= 0 || line.indexOf("完成") >= 0 || line.indexOf("已生成") >= 0 || line.indexOf("BUILD SUCCESSFUL") >= 0 || line.indexOf("构建验证通过") >= 0 || line.indexOf("客户端验证通过") >= 0 || line.indexOf("已成功加载") >= 0) {
-            div.className = "log-ok";
-          }
+          if (line.indexOf("失败") >= 0 || line.indexOf("ERROR") >= 0) div.className = "log-err";
+          if (line.indexOf("成功") >= 0 || line.indexOf("BUILD SUCCESSFUL") >= 0) div.className = "log-ok";
           div.textContent = line;
           log.appendChild(div);
-        }
+        });
         log.scrollTop = log.scrollHeight;
       }
 
-      if (generationCancelled) return;
-
-      if (exitCode !== null && exitCode !== 0) {
-        throw new Error("流程未完成（退出码 " + exitCode + "），请查看上方日志后点「返回修改」重试");
-      }
-    } catch (err) {
-      if (generationCancelled || err.name === "AbortError") return;
-      var div = document.createElement("div");
-      div.className = "log-err";
-      div.textContent = "出错了：" + (err.message || String(err));
-      log.appendChild(div);
-      log.scrollTop = log.scrollHeight;
-      if (genCancel) genCancel.textContent = "返回修改";
-      return;
+      if (exitCode !== 0 && exitCode !== null) throw new Error("退出码 " + exitCode);
+      setPhase("done");
+      await loadMods();
+      showView("list");
+      showCreateStep("step-loader");
+    } catch (e) {
+      if (state.generationCancelled || e.name === "AbortError") return;
+      showError("创建失败：" + e.message);
+      showCreateStep("step-config");
     }
-
-    setPhase("done");
-    $("done-path").textContent = dir;
-    showStep("step-done");
   }
 
-  // ============ Step 4: Done ============
-  var doneClose = $("done-close");
-  var doneOpenFolder = $("done-open-folder");
-  if (doneClose) {
-    doneClose.addEventListener("click", function () {
-      fetch("/api/close").then(function () {
-        window.close();
-      }).catch(function () {
-        window.close();
+  // ============ 设置 & 外部项目 ============
+
+  async function removeScanDir(dir) {
+    await api("/api/settings/scan-dirs", { method: "POST", body: { remove: dir } });
+  }
+
+  async function addScanDirAndOptionalScan(dirPath, doScan) {
+    await api("/api/settings/scan-dirs", { method: "POST", body: { add: dirPath } });
+    if (doScan) {
+      return api("/api/mods/scan", { method: "POST", body: { path: dirPath } });
+    }
+  }
+
+  function renderScanDirList(containerId, dirs, projectsRoot) {
+    var list = $(containerId);
+    if (!list) return;
+    list.innerHTML = "";
+    if (!dirs.length) {
+      list.innerHTML = '<p style="font-size:12px;color:var(--text-dim)">暂无额外监视目录</p>';
+      return;
+    }
+    dirs.forEach(function (dir) {
+      var isBuiltin = projectsRoot && dir.replace(/\\/g, "/").toLowerCase()
+        === projectsRoot.replace(/\\/g, "/").toLowerCase();
+      var row = document.createElement("div");
+      row.style.cssText = "display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap";
+      row.innerHTML = '<input readonly value="' + esc(dir) + '" style="flex:1;min-width:200px;opacity:0.85;font-size:12px;font-family:Consolas,monospace">';
+      if (!isBuiltin) {
+        var scanBtn = document.createElement("button");
+        scanBtn.className = "btn btn-secondary btn-sm";
+        scanBtn.textContent = "扫描";
+        scanBtn.addEventListener("click", async function () {
+          var r = await api("/api/mods/scan", { method: "POST", body: { path: dir } });
+          alert("扫描完成：新导入 " + r.imported + " 个，跳过 " + r.skipped + " 个");
+          loadRegistry();
+          loadMods();
+        });
+        row.appendChild(scanBtn);
+        var rm = document.createElement("button");
+        rm.className = "btn btn-danger btn-sm";
+        rm.textContent = "移除";
+        rm.addEventListener("click", async function () {
+          if (!confirm("移除监视目录「" + dir + "」？\n（不会删除已注册的项目条目，需手动清理）")) return;
+          await removeScanDir(dir);
+          loadSettings();
+          loadExternalView();
+        });
+        row.appendChild(rm);
+      } else {
+        var tag = document.createElement("span");
+        tag.style.cssText = "font-size:11px;color:var(--success)";
+        tag.textContent = "内置";
+        row.appendChild(tag);
+      }
+      list.appendChild(row);
+    });
+  }
+
+  async function loadSettings() {
+    var data = await api("/api/settings");
+    $("dmcl-dir").value = data.dmclDir || "";
+    if ($("projects-root")) $("projects-root").value = data.projectsRoot || "";
+    var extra = (data.scanDirs || []).filter(function (d) {
+      return !data.projectsRoot || d.replace(/\\/g, "/").toLowerCase()
+        !== data.projectsRoot.replace(/\\/g, "/").toLowerCase();
+    });
+    renderScanDirList("scan-dirs-list", extra, data.projectsRoot);
+  }
+
+  async function registryAction(action, project) {
+    if (action === "open") {
+      openDetail(project.modUuid);
+    } else if (action === "relocate") {
+      var pick = await api("/api/select-dir");
+      if (!pick.path) return;
+      await api("/api/variants/" + project.variantId + "/path", {
+        method: "PATCH", body: { path: pick.path },
+      });
+      loadRegistry();
+      loadMods();
+    } else if (action === "remove") {
+      if (!confirm("移除此项目注册？磁盘文件不会被删除。")) return;
+      await api("/api/mods/" + project.modUuid + "/variants/" + project.variantId, { method: "DELETE" });
+      loadRegistry();
+      loadMods();
+    }
+  }
+
+  async function loadRegistry() {
+    var wrap = $("registry-wrap");
+    if (!wrap) return;
+    var data = await api("/api/registry/projects");
+    var projects = data.projects || [];
+    if (!projects.length) {
+      wrap.innerHTML = '<p style="font-size:13px;color:var(--text-dim);padding:12px 0">暂无已注册项目</p>';
+      return;
+    }
+    var html = '<table class="registry-table"><thead><tr>' +
+      '<th>模组</th><th>变体</th><th>路径</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+    projects.forEach(function (p) {
+      var status = p.pathMissing ? "⚠️ 路径缺失" : (p.isBuiltin ? "内置" : "外部");
+      html += '<tr data-vid="' + p.variantId + '">' +
+        '<td>' + esc(p.displayName) + '<br><span style="color:var(--text-dim)">' + esc(p.modId) + '</span></td>' +
+        '<td>' + LOADER_LABELS[p.loader] + ' ' + esc(p.mcVersion) + '</td>' +
+        '<td class="path-cell">' + esc(p.projectPath) + '</td>' +
+        '<td>' + status + '</td>' +
+        '<td class="actions">' +
+          '<button class="btn btn-secondary btn-sm" data-act="open" data-vid="' + p.variantId + '">详情</button>' +
+          '<button class="btn btn-secondary btn-sm" data-act="relocate" data-vid="' + p.variantId + '">改路径</button>' +
+          '<button class="btn btn-danger btn-sm" data-act="remove" data-vid="' + p.variantId + '">移除</button>' +
+        '</td></tr>';
+    });
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+
+    var byId = {};
+    projects.forEach(function (p) { byId[p.variantId] = p; });
+
+    wrap.querySelectorAll("[data-act]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var p = byId[btn.dataset.vid];
+        if (p) registryAction(btn.dataset.act, p);
       });
     });
   }
-  if (doneOpenFolder) {
-    doneOpenFolder.addEventListener("click", function () {
-      fetch("/api/open-folder", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: projectDir }),
-      }).catch(function () {});
+
+  async function loadExternalView() {
+    var settings = await api("/api/settings");
+    if ($("projects-root")) $("projects-root").value = settings.projectsRoot || "";
+    var extra = (settings.scanDirs || []).filter(function (d) {
+      return !settings.projectsRoot || d.replace(/\\/g, "/").toLowerCase()
+        !== settings.projectsRoot.replace(/\\/g, "/").toLowerCase();
     });
+    renderScanDirList("ext-scan-dirs", extra, settings.projectsRoot);
+    await loadRegistry();
   }
 
-  console.log("[dmcl] Renderer ready ✓");
+  // ============ Modal ============
+
+  function showModal(title, content) {
+    $("modal-title").textContent = title;
+    var log = $("modal-log");
+    log.innerHTML = "";
+    if (typeof content === "string") {
+      content.split("\n").forEach(function (line) {
+        var div = document.createElement("div");
+        div.textContent = line;
+        log.appendChild(div);
+      });
+    }
+    $("modal-overlay").classList.add("visible");
+  }
+
+  $("modal-close").addEventListener("click", function () {
+    $("modal-overlay").classList.remove("visible");
+  });
+
+  // ============ 导航与工具栏 ============
+
+  document.querySelectorAll(".nav-btn").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var view = btn.dataset.view;
+      if (view === "create") {
+        resetCreateWizard();
+        showView("create");
+        showCreateStep("step-loader");
+      } else {
+        showView(view);
+        if (view === "settings") loadSettings();
+        if (view === "external") loadExternalView();
+        if (view === "list") loadMods();
+      }
+    });
+  });
+
+  $("detail-back").addEventListener("click", function () {
+    state.currentModId = null;
+    showView("list");
+    loadMods();
+  });
+
+  $("btn-new-mod").addEventListener("click", function () {
+    document.querySelector('.nav-btn[data-view="create"]').click();
+  });
+
+  $("btn-scan").addEventListener("click", async function () {
+    try {
+      var data = await api("/api/mods/reconcile", { method: "POST", body: {} });
+      alert("检测完成：检查 " + data.checked + " 个，" + data.missing + " 个路径缺失，" + data.relocated + " 个已自动找回");
+      loadMods();
+    } catch (e) { showError(e.message); }
+  });
+
+  $("btn-scan-import").addEventListener("click", async function () {
+    try {
+      var data = await api("/api/mods/scan", { method: "POST", body: {} });
+      alert("扫描完成：新导入 " + data.imported + " 个，跳过 " + data.skipped + " 个");
+      loadMods();
+    } catch (e) { showError(e.message); }
+  });
+
+  $("btn-purge").addEventListener("click", async function () {
+    if (!confirm("移除所有路径已失效的项目条目？")) return;
+    try {
+      var data = await api("/api/mods/purge-missing", { method: "POST", body: {} });
+      alert("已清理 " + data.removed + " 个失效条目");
+      loadMods();
+    } catch (e) { showError(e.message); }
+  });
+
+  $("btn-delete-mod").addEventListener("click", async function () {
+    if (!state.currentModId) return;
+    if (!confirm("删除整个模组及其所有变体注册？磁盘文件不会被删除，且不会自动重新导入。")) return;
+    try {
+      await api("/api/mods/" + state.currentModId, { method: "DELETE" });
+      state.currentModId = null;
+      showView("list");
+      loadMods();
+    } catch (e) { showError("删除失败：" + e.message); }
+  });
+
+  $("btn-ext-import").addEventListener("click", async function () {
+    var pick = await api("/api/select-dir");
+    if (!pick.path) return;
+    try {
+      var result = await api("/api/mods/import", { method: "POST", body: { path: pick.path } });
+      loadRegistry();
+      loadMods();
+      if (result.mod) openDetail(result.mod.id);
+    } catch (e) { showError("导入失败：" + e.message); }
+  });
+
+  $("btn-ext-scan-all").addEventListener("click", async function () {
+    try {
+      var data = await api("/api/mods/scan", { method: "POST", body: {} });
+      alert("扫描完成：新导入 " + data.imported + " 个，跳过 " + data.skipped + " 个");
+      loadRegistry();
+      loadMods();
+    } catch (e) { showError(e.message); }
+  });
+
+  $("btn-ext-purge").addEventListener("click", async function () {
+    if (!confirm("移除所有路径已失效的项目条目？")) return;
+    var data = await api("/api/mods/purge-missing", { method: "POST", body: {} });
+    alert("已清理 " + data.removed + " 个失效条目");
+    loadRegistry();
+    loadMods();
+  });
+
+  $("btn-ext-add-dir").addEventListener("click", async function () {
+    var pick = await api("/api/select-dir");
+    if (!pick.path) return;
+    await addScanDirAndOptionalScan(pick.path, true);
+    loadExternalView();
+    loadSettings();
+  });
+
+  $("btn-import").addEventListener("click", async function () {
+    var pick = await api("/api/select-dir");
+    if (!pick.path) return;
+    try {
+      var result = await api("/api/mods/import", { method: "POST", body: { path: pick.path } });
+      if (result.mod) openDetail(result.mod.id);
+      else loadMods();
+    } catch (e) { showError("导入失败：" + e.message); }
+  });
+
+  $("btn-export").addEventListener("click", async function () {
+    var data = await api("/api/export/catalog", { method: "POST", body: {} });
+    alert("已导出到：\n" + data.path);
+  });
+
+  $("btn-build-all").addEventListener("click", async function () {
+    if (!state.currentModId) return;
+    await api("/api/mods/" + state.currentModId + "/build-all", {
+      method: "POST", body: { runClient: false },
+    });
+    updateQueueBar();
+    refreshDetail();
+  });
+
+  $("btn-add-variant").addEventListener("click", function () {
+    alert("在上方支持矩阵中点击 ➕ 格子，即可一键生成对应加载器/版本的变体");
+  });
+
+  $("search-mods").addEventListener("input", function () {
+    state.search = $("search-mods").value.trim();
+    renderModList();
+  });
+
+  document.querySelectorAll(".filter-chip").forEach(function (chip) {
+    chip.addEventListener("click", function () {
+      document.querySelectorAll(".filter-chip").forEach(function (c) { c.classList.remove("active"); });
+      chip.classList.add("active");
+      state.filter = chip.dataset.filter;
+      renderModList();
+    });
+  });
+
+  $("queue-cancel").addEventListener("click", async function () {
+    await api("/api/queue/cancel", { method: "POST" });
+    updateQueueBar();
+  });
+
+  $("btn-add-scan-dir").addEventListener("click", async function () {
+    var pick = await api("/api/select-dir");
+    if (!pick.path) return;
+    await addScanDirAndOptionalScan(pick.path, true);
+    loadSettings();
+    loadMods();
+  });
+
+  // ============ Init ============
+
+  initCreateWizard();
+  loadMods();
+  updateQueueBar();
+
+  console.log("[dmcl] Workbench ready");
 })();

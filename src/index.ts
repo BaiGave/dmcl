@@ -8,9 +8,7 @@ import { parseArgs } from "node:util";
 import { spawnSync } from "node:child_process";
 import { LOADER_LABELS, MAPPINGS_FOR_LOADER, MAPPINGS_LABELS, type LoaderId, type MappingsId, type ProjectOptions } from "./types.js";
 import { fetchReleaseVersions } from "./meta/mojang.js";
-import { fetchFabricGameVersions } from "./meta/fabric.js";
-import { forgeSupportedMcVersions } from "./meta/forge.js";
-import { fetchNeoForgeVersions, pickNeoForgeVersion } from "./meta/neoforge.js";
+import { supportedVersions } from "./meta/versions.js";
 import { scaffoldFabric } from "./loaders/fabric.js";
 import { scaffoldForge } from "./loaders/forge.js";
 import { scaffoldNeoForge } from "./loaders/neoforge.js";
@@ -39,19 +37,6 @@ function pascalCase(input: string): string {
     .map((w) => w[0].toUpperCase() + w.slice(1))
     .join("");
   return /^[A-Za-z]/.test(name) ? name : `Mod${name}`;
-}
-
-async function supportedVersions(loader: LoaderId, releases: string[]): Promise<string[]> {
-  if (loader === "fabric") {
-    const fab = new Set(await fetchFabricGameVersions());
-    return releases.filter((v) => fab.has(v));
-  }
-  if (loader === "forge") {
-    const set = await forgeSupportedMcVersions();
-    return releases.filter((v) => set.has(v));
-  }
-  const versions = await fetchNeoForgeVersions();
-  return releases.filter((v) => pickNeoForgeVersion(versions, v) !== null);
 }
 
 async function scaffold(opts: ProjectOptions, log: (msg: string) => void): Promise<void> {

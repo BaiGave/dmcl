@@ -9,5 +9,12 @@
     "skipLibCheck": true,
     "resolveJsonModule": true
   },
-  "files": ["main.ts", "gradle.ts"]
+  "files": [
+    "main.ts",
+    "gradle.ts",
+    "gradle-runner.ts",
+    "build-queue.ts",
+    "workspace-api.ts",
+    "preload-bridge.ts"
+  ]
 }

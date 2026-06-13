@@ -23,9 +23,12 @@
     --success-dim: rgba(124, 171, 90, 0.12);
     --danger: #c75c5c;
     --danger-dim: rgba(199, 92, 92, 0.12);
+    --info: #6a9fd8;
+    --info-dim: rgba(106, 159, 216, 0.12);
     --radius: 10px;
     --radius-lg: 14px;
     --shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+    --sidebar-w: 200px;
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -37,449 +40,494 @@
       radial-gradient(ellipse 80% 50% at 50% -10%, rgba(212, 168, 83, 0.08), transparent),
       radial-gradient(ellipse 60% 40% at 100% 100%, rgba(124, 171, 90, 0.05), transparent);
     color: var(--text);
-    display: flex;
-    justify-content: center;
-    align-items: center;
     min-height: 100vh;
-    padding: 28px 20px;
   }
 
-  .app {
-    width: 100%;
-    max-width: 640px;
+  .layout {
+    display: flex;
+    min-height: 100vh;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  .sidebar {
+    width: var(--sidebar-w);
     background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    box-shadow: var(--shadow);
-    overflow: hidden;
+    border-right: 1px solid var(--border);
+    padding: 24px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex-shrink: 0;
   }
 
-  /* ---- Header ---- */
-  .header {
-    padding: 28px 32px 22px;
-    border-bottom: 1px solid var(--border);
-    background: linear-gradient(180deg, var(--card-raised) 0%, var(--card) 100%);
-  }
-  .header-top {
+  .logo-block {
     display: flex;
     align-items: center;
-    gap: 14px;
+    gap: 10px;
+    padding: 0 8px 20px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 8px;
   }
   .logo {
-    width: 44px;
-    height: 44px;
-    border-radius: 10px;
-    background: linear-gradient(145deg, #5a8a3c 0%, #3d6b28 100%);
+    width: 36px; height: 36px;
+    border-radius: 8px;
+    background: linear-gradient(145deg, #5a8a3c, #3d6b28);
     border: 2px solid #6b9e45;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 22px;
-    flex-shrink: 0;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255,255,255,0.15);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
   }
-  .header-text h1 {
-    font-size: 20px;
-    font-weight: 700;
-    letter-spacing: -0.02em;
-    color: var(--text);
-  }
-  .header-text h1 span {
-    color: var(--accent-bright);
-  }
-  .sub {
+  .logo-block h1 { font-size: 16px; font-weight: 700; }
+  .logo-block h1 span { color: var(--accent-bright); }
+  .logo-block p { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+
+  .nav-btn {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 12px;
+    border: none; border-radius: 8px;
+    background: transparent;
     color: var(--text-muted);
-    font-size: 13px;
-    margin-top: 2px;
-  }
-
-  .body { padding: 28px 32px 32px; }
-
-  .step { display: none; animation: fadeIn 0.25s ease; }
-  .step.active { display: block; }
-  @keyframes fadeIn {
-    from { opacity: 0; transform: translateY(6px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
-
-  .step-title {
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--text);
-    margin-bottom: 16px;
-    line-height: 1.5;
-  }
-  .step-title .hint-inline {
-    display: block;
-    font-weight: 400;
-    font-size: 13px;
-    color: var(--text-muted);
-    margin-top: 4px;
-  }
-
-  /* ---- Loader cards ---- */
-  .cards { display: flex; gap: 10px; flex-wrap: wrap; }
-  .card {
-    flex: 1;
-    min-width: 130px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 18px 14px;
-    cursor: pointer;
-    text-align: center;
-    background: var(--bg);
-    transition: border-color 0.2s, background 0.2s, box-shadow 0.2s, transform 0.15s;
-  }
-  .card:hover {
-    border-color: var(--border-light);
-    background: var(--card-raised);
-    transform: translateY(-1px);
-  }
-  .card.selected {
-    border-color: var(--accent);
-    background: var(--accent-dim);
-    box-shadow: 0 0 0 1px var(--accent-glow), 0 4px 16px rgba(0, 0, 0, 0.2);
-  }
-  .card .icon { font-size: 28px; margin-bottom: 10px; line-height: 1; }
-  .card .label { font-weight: 600; font-size: 14px; color: var(--text); }
-  .card .hint { font-size: 11px; color: var(--text-dim); margin-top: 6px; line-height: 1.4; }
-
-  /* ---- Forms ---- */
-  .form-group { margin-bottom: 18px; }
-  .form-group label {
-    display: block;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-muted);
-    margin-bottom: 7px;
-    letter-spacing: 0.02em;
-    text-transform: none;
-  }
-  .form-group input,
-  .form-group select {
+    font-size: 13px; font-weight: 500;
+    cursor: pointer; text-align: left;
+    transition: background 0.15s, color 0.15s;
     width: 100%;
-    padding: 10px 14px;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    color: var(--text);
-    font-size: 14px;
-    outline: none;
-    transition: border-color 0.15s, box-shadow 0.15s;
   }
-  .form-group input::placeholder { color: var(--text-dim); }
-  .form-group input:focus,
-  .form-group select:focus {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px var(--accent-dim);
-  }
-  .form-row { display: flex; gap: 8px; }
-  .form-row input { flex: 1; }
+  .nav-btn:hover { background: var(--card-raised); color: var(--text); }
+  .nav-btn.active { background: var(--accent-dim); color: var(--accent-bright); }
 
-  #dir-preview {
-    font-size: 12px;
-    color: var(--success);
-    margin-top: 6px;
-    min-height: 18px;
-    font-family: Consolas, "JetBrains Mono", monospace;
-    opacity: 0.9;
-  }
-
-  details.advanced {
-    margin-bottom: 18px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 12px 14px;
-    background: var(--bg);
-  }
-  details.advanced summary {
-    font-size: 13px;
-    color: var(--text-muted);
-    cursor: pointer;
-    user-select: none;
-    list-style: none;
-  }
-  details.advanced summary::-webkit-details-marker { display: none; }
-  details.advanced summary::before {
-    content: "▸ ";
-    color: var(--accent);
+  .sidebar-footer {
+    margin-top: auto;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
     font-size: 11px;
-  }
-  details.advanced[open] summary::before { content: "▾ "; }
-  details.advanced summary:hover { color: var(--accent-bright); }
-  details.advanced .form-group { margin-top: 14px; margin-bottom: 0; }
-  details.advanced .form-group + .form-group { margin-top: 14px; }
-
-  .checkbox-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-    color: var(--text-muted);
-    margin-top: 14px;
-    cursor: pointer;
-  }
-  .checkbox-row input[type="checkbox"] {
-    width: 16px;
-    height: 16px;
-    accent-color: var(--accent);
-    cursor: pointer;
+    color: var(--text-dim);
+    padding-left: 8px;
   }
 
-  /* ---- Buttons ---- */
+  .main {
+    flex: 1;
+    padding: 24px 28px;
+    overflow-y: auto;
+    min-width: 0;
+  }
+
+  .view { display: none; animation: fadeIn 0.2s ease; }
+  .view.active { display: block; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+  .page-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 20px; gap: 12px; flex-wrap: wrap;
+  }
+  .page-header h2 { font-size: 20px; font-weight: 700; }
+  .page-header .sub { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
+
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+
   .btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    padding: 11px 22px;
-    border-radius: 8px;
-    border: none;
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 9px 18px; border-radius: 8px; border: none;
+    font-size: 13px; font-weight: 600; cursor: pointer;
     transition: transform 0.12s, box-shadow 0.15s, opacity 0.15s;
   }
   .btn:hover:not(:disabled) { transform: translateY(-1px); }
-  .btn:active:not(:disabled) { transform: translateY(0); }
   .btn:disabled { opacity: 0.35; cursor: not-allowed; }
-
   .btn-primary {
-    background: linear-gradient(180deg, var(--accent-bright) 0%, var(--accent) 100%);
+    background: linear-gradient(180deg, var(--accent-bright), var(--accent));
     color: #1a1408;
     box-shadow: 0 2px 8px rgba(212, 168, 83, 0.3);
   }
-  .btn-primary:hover:not(:disabled) {
-    box-shadow: 0 4px 14px rgba(212, 168, 83, 0.4);
-  }
   .btn-secondary {
-    background: var(--card-raised);
-    color: var(--text);
+    background: var(--card-raised); color: var(--text);
     border: 1px solid var(--border);
   }
-  .btn-secondary:hover:not(:disabled) {
-    border-color: var(--border-light);
-    background: var(--bg);
-  }
-  .btn-sm { padding: 9px 16px; font-size: 13px; }
-  .btn-group { display: flex; gap: 10px; margin-top: 26px; }
+  .btn-sm { padding: 6px 12px; font-size: 12px; }
+  .btn-danger { background: var(--danger-dim); color: #e89898; border: 1px solid rgba(199,92,92,0.4); }
 
-  /* ---- Log ---- */
-  .log {
-    background: var(--bg-deep);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 14px;
-    height: 240px;
-    overflow-y: auto;
-    font-family: Consolas, "JetBrains Mono", "Cascadia Mono", monospace;
-    font-size: 12px;
-    line-height: 1.75;
-    color: var(--text-muted);
+  .filter-bar {
+    display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap;
   }
-  .log::-webkit-scrollbar { width: 6px; }
-  .log::-webkit-scrollbar-track { background: transparent; }
-  .log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .filter-chip {
+    padding: 5px 12px; border-radius: 20px; font-size: 12px;
+    border: 1px solid var(--border); background: var(--card);
+    color: var(--text-muted); cursor: pointer;
+  }
+  .filter-chip.active { border-color: var(--accent); color: var(--accent-bright); background: var(--accent-dim); }
+
+  .search-input {
+    width: 100%; max-width: 280px;
+    padding: 8px 14px; background: var(--card);
+    border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); font-size: 13px; outline: none;
+    margin-bottom: 16px;
+  }
+  .search-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+
+  .mod-grid { display: flex; flex-direction: column; gap: 10px; }
+
+  .mod-card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 16px 18px;
+    cursor: pointer; transition: border-color 0.15s, transform 0.12s;
+  }
+  .mod-card:hover { border-color: var(--border-light); transform: translateY(-1px); }
+  .mod-card-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+  .mod-card h3 { font-size: 15px; font-weight: 600; }
+  .mod-card .meta { font-size: 12px; color: var(--text-muted); margin-top: 6px; line-height: 1.6; }
+  .mod-card .variants-summary { font-family: Consolas, monospace; font-size: 11px; color: var(--accent-bright); margin-top: 4px; }
+
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 11px; font-weight: 600;
+  }
+  .badge-active { background: var(--success-dim); color: var(--success); }
+  .badge-paused { background: var(--accent-dim); color: var(--accent); }
+  .badge-released { background: var(--info-dim); color: var(--info); }
+
+  .empty-state {
+    text-align: center; padding: 48px 24px;
+    color: var(--text-muted); font-size: 14px;
+  }
+  .empty-state p { margin-top: 8px; font-size: 13px; color: var(--text-dim); }
+
+  /* Matrix */
+  .matrix-wrap { overflow-x: auto; margin: 16px 0; }
+  .matrix {
+    border-collapse: collapse; font-size: 12px; min-width: 100%;
+  }
+  .matrix th, .matrix td {
+    border: 1px solid var(--border);
+    padding: 8px 10px; text-align: center; white-space: nowrap;
+  }
+  .matrix th { background: var(--card-raised); color: var(--text-muted); font-weight: 600; }
+  .matrix th.row-head { text-align: left; min-width: 90px; }
+  .cell-built { background: var(--success-dim); color: var(--success); cursor: pointer; }
+  .cell-exists { background: var(--accent-dim); color: var(--accent-bright); cursor: pointer; }
+  .cell-failed { background: var(--danger-dim); color: #e89898; cursor: pointer; }
+  .cell-building { background: var(--accent-dim); color: var(--accent-bright); }
+  .cell-available { background: var(--info-dim); color: var(--info); cursor: pointer; }
+  .cell-available:hover { background: rgba(106,159,216,0.25); }
+  .cell-unsupported { background: var(--bg); color: var(--text-dim); }
+
+  .variant-list { display: flex; flex-direction: column; gap: 10px; margin-top: 20px; }
+  .variant-item {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 14px 16px;
+  }
+  .variant-item-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .variant-item h4 { font-size: 14px; }
+  .variant-item .path { font-size: 11px; color: var(--text-dim); font-family: Consolas, monospace; margin-top: 4px; word-break: break-all; }
+  .variant-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+
+  .detail-meta {
+    display: flex; gap: 16px; flex-wrap: wrap;
+    font-size: 12px; color: var(--text-muted); margin-bottom: 16px;
+  }
+  .detail-meta span { font-family: Consolas, monospace; color: var(--accent-bright); }
+
+  /* Create wizard (reuse) */
+  .cards { display: flex; gap: 10px; flex-wrap: wrap; }
+  .card {
+    flex: 1; min-width: 130px;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 18px 14px; cursor: pointer; text-align: center;
+    background: var(--bg); transition: all 0.2s;
+  }
+  .card:hover { border-color: var(--border-light); background: var(--card-raised); }
+  .card.selected { border-color: var(--accent); background: var(--accent-dim); box-shadow: 0 0 0 1px var(--accent-glow); }
+  .card .icon { font-size: 28px; margin-bottom: 10px; }
+  .card .label { font-weight: 600; font-size: 14px; }
+  .card .hint { font-size: 11px; color: var(--text-dim); margin-top: 6px; }
+
+  .form-group { margin-bottom: 16px; }
+  .form-group label { display: block; font-size: 12px; font-weight: 600; color: var(--text-muted); margin-bottom: 6px; }
+  .form-group input, .form-group select {
+    width: 100%; padding: 9px 12px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); font-size: 13px; outline: none;
+  }
+  .form-group input:focus, .form-group select:focus { border-color: var(--accent); }
+  .form-row { display: flex; gap: 8px; }
+  .form-row input { flex: 1; }
+  .btn-group { display: flex; gap: 10px; margin-top: 20px; }
+
+  details.advanced {
+    margin-bottom: 16px; border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 12px 14px; background: var(--bg);
+  }
+  details.advanced summary { font-size: 13px; color: var(--text-muted); cursor: pointer; }
+
+  .log {
+    background: var(--bg-deep); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 12px;
+    height: 220px; overflow-y: auto;
+    font-family: Consolas, monospace; font-size: 11px;
+    line-height: 1.7; color: var(--text-muted);
+  }
   .log-err { color: var(--danger); }
   .log-ok { color: var(--success); }
 
-  /* ---- Phase stepper ---- */
-  .phase-bar {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px 2px;
-    margin-bottom: 16px;
-    align-items: center;
-    font-size: 12px;
-  }
-  .phase {
-    padding: 5px 10px;
-    border-radius: 6px;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-    white-space: nowrap;
-    transition: all 0.2s;
-  }
-  .phase.active {
-    border-color: var(--accent);
-    color: var(--accent-bright);
-    background: var(--accent-dim);
-  }
-  .phase.done {
-    border-color: var(--success);
-    color: var(--success);
-    background: var(--success-dim);
-  }
-  .phase-arrow { color: var(--text-dim); font-size: 10px; padding: 0 2px; }
+  .phase-bar { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 12px; font-size: 11px; }
+  .phase { padding: 4px 8px; border-radius: 6px; background: var(--bg); border: 1px solid var(--border); color: var(--text-dim); }
+  .phase.active { border-color: var(--accent); color: var(--accent-bright); background: var(--accent-dim); }
+  .phase.done { border-color: var(--success); color: var(--success); background: var(--success-dim); }
 
-  #gen-hint {
-    margin-bottom: 10px;
-    font-size: 13px;
-    color: var(--text-muted);
-    line-height: 1.5;
+  #error-box {
+    display: none; background: var(--danger-dim);
+    border: 1px solid rgba(199,92,92,0.4); border-radius: 8px;
+    padding: 10px 14px; margin-bottom: 16px;
+    font-size: 13px; color: #e89898;
   }
 
-  /* ---- Done ---- */
-  .done-box {
-    text-align: center;
-    padding: 32px 16px 24px;
+  .queue-bar {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    background: var(--card); border-top: 1px solid var(--border);
+    padding: 10px 20px; font-size: 12px;
+    display: none; align-items: center; gap: 12px;
+    z-index: 100;
   }
-  .done-icon {
-    width: 64px;
-    height: 64px;
-    margin: 0 auto 16px;
-    border-radius: 50%;
-    background: var(--success-dim);
-    border: 2px solid var(--success);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 28px;
-    color: var(--success);
-  }
-  #done-title {
-    font-size: 17px;
-    font-weight: 700;
-    color: var(--text);
-    line-height: 1.4;
-  }
-  .done-box p { color: var(--text-muted); font-size: 13px; margin-top: 8px; line-height: 1.6; }
-  #done-path {
-    font-family: Consolas, monospace;
-    font-size: 12px;
-    color: var(--accent-bright);
-    word-break: break-all;
-    margin-top: 10px !important;
-  }
-
-  .spinner {
-    display: inline-block;
-    width: 12px;
-    height: 12px;
-    border: 2px solid var(--border);
-    border-top-color: var(--accent);
-    border-radius: 50%;
+  .queue-bar.visible { display: flex; }
+  .queue-bar .spinner {
+    width: 12px; height: 12px; border: 2px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%;
     animation: spin 0.7s linear infinite;
-    vertical-align: middle;
-    margin-right: 5px;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  #error-box {
-    display: none;
-    background: var(--danger-dim);
-    border: 1px solid rgba(199, 92, 92, 0.4);
-    border-radius: 8px;
-    padding: 11px 14px;
-    margin-bottom: 18px;
-    font-size: 13px;
-    color: #e89898;
-    line-height: 1.5;
+  .modal-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6); z-index: 200;
+    align-items: center; justify-content: center; padding: 20px;
+  }
+  .modal-overlay.visible { display: flex; }
+  .modal {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius-lg); padding: 20px 24px;
+    max-width: 640px; width: 100%; max-height: 80vh;
+    overflow-y: auto; box-shadow: var(--shadow);
+  }
+  .modal h3 { font-size: 16px; margin-bottom: 12px; }
+  .modal .log { height: 300px; margin-top: 12px; }
+
+  .back-link {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 13px; color: var(--text-muted); cursor: pointer;
+    margin-bottom: 12px; border: none; background: none;
+  }
+  .registry-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+  .registry-table th, .registry-table td {
+    border: 1px solid var(--border); padding: 8px 10px; text-align: left;
+    vertical-align: top;
+  }
+  .registry-table th { background: var(--card-raised); color: var(--text-muted); }
+  .registry-table .path-cell { font-family: Consolas, monospace; font-size: 11px; word-break: break-all; max-width: 280px; }
+  .registry-table .actions { display: flex; gap: 4px; flex-wrap: wrap; }
+  .hint-box {
+    font-size: 12px; color: var(--text-dim); line-height: 1.6;
+    padding: 10px 12px; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; margin-bottom: 16px;
   }
 </style>
 </head>
 <body>
-<div class="app">
-  <div class="header">
-    <div class="header-top">
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="logo-block">
       <div class="logo">⛏</div>
-      <div class="header-text">
+      <div>
         <h1><span>DMCL</span></h1>
-        <p class="sub">Developer Minecraft Launcher · 模组开发工作台</p>
+        <p>模组开发工作台</p>
       </div>
     </div>
-  </div>
+    <button class="nav-btn active" data-view="list">📋 我的模组</button>
+    <button class="nav-btn" data-view="create">✨ 新建模组</button>
+    <button class="nav-btn" data-view="external">📂 外部项目</button>
+    <button class="nav-btn" data-view="settings">⚙️ 设置</button>
+    <div class="sidebar-footer" id="sidebar-status">就绪</div>
+  </aside>
 
-  <div class="body">
+  <main class="main">
     <div id="error-box"><span id="error-text"></span></div>
 
-    <!-- Step 1: Loader -->
-    <div class="step active" id="step-loader">
-      <p class="step-title">
-        选择模组加载器
-        <span class="hint-inline">不确定就选 Fabric，轻量且更新快</span>
-      </p>
-      <div class="cards" id="loader-cards"></div>
-      <div class="btn-group">
-        <button class="btn btn-primary" id="loader-next" disabled>下一步</button>
+    <!-- 模组列表 -->
+    <div class="view active" id="view-list">
+      <div class="page-header">
+        <div>
+          <h2>开发中的模组</h2>
+          <p class="sub">查看支持的加载器与版本，一键构建其它变体</p>
+        </div>
+        <div class="toolbar">
+          <button class="btn btn-secondary btn-sm" id="btn-scan">刷新检测</button>
+          <button class="btn btn-secondary btn-sm" id="btn-scan-import">扫描导入</button>
+          <button class="btn btn-secondary btn-sm" id="btn-purge">清理失效</button>
+          <button class="btn btn-secondary btn-sm" id="btn-import">导入项目</button>
+          <button class="btn btn-secondary btn-sm" id="btn-export">导出目录</button>
+          <button class="btn btn-primary btn-sm" id="btn-new-mod">+ 新建</button>
+        </div>
+      </div>
+      <input class="search-input" id="search-mods" placeholder="搜索模组名称或 ID…">
+      <div class="filter-bar" id="filter-bar">
+        <button class="filter-chip active" data-filter="all">全部</button>
+        <button class="filter-chip" data-filter="active">开发中</button>
+        <button class="filter-chip" data-filter="paused">暂停</button>
+        <button class="filter-chip" data-filter="released">已发布</button>
+      </div>
+      <div class="mod-grid" id="mod-grid"></div>
+      <div class="empty-state" id="empty-state" style="display:none">
+        <div style="font-size:32px">📦</div>
+        <p>还没有注册的模组</p>
+        <p>点击「新建」创建，或「导入」添加已有项目</p>
       </div>
     </div>
 
-    <!-- Step 2: Config -->
-    <div class="step" id="step-config">
-      <div class="form-group">
-        <label>模组名字</label>
-        <input id="inp-name" placeholder="我的第一个模组 / My First Mod" value="">
-      </div>
-      <div class="form-group">
-        <label>Minecraft 版本</label>
-        <select id="sel-mc"></select>
-      </div>
-      <div class="form-group">
-        <label>项目保存位置</label>
-        <div class="form-row">
-          <input id="inp-dir" placeholder="加载中…" value="">
-          <button class="btn btn-secondary btn-sm" id="btn-browse" type="button">浏览</button>
+    <!-- 模组详情 -->
+    <div class="view" id="view-detail">
+      <button class="back-link" id="detail-back">← 返回列表</button>
+      <div class="page-header">
+        <div>
+          <h2 id="detail-name">—</h2>
+          <div class="detail-meta" id="detail-meta"></div>
         </div>
-        <div id="dir-preview"></div>
+        <div class="toolbar">
+          <button class="btn btn-secondary btn-sm" id="btn-build-all">构建全部</button>
+          <button class="btn btn-secondary btn-sm" id="btn-add-variant">+ 添加变体</button>
+          <button class="btn btn-danger btn-sm" id="btn-delete-mod">删除模组</button>
+        </div>
       </div>
+      <h3 style="font-size:14px;margin-bottom:8px;color:var(--text-muted)">支持矩阵</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:8px">点击 ➕ 格子一键生成该加载器/版本变体；点击 ✅ 查看变体操作</p>
+      <div class="matrix-wrap" id="matrix-wrap"></div>
+      <h3 style="font-size:14px;margin:20px 0 10px;color:var(--text-muted)">已有变体</h3>
+      <div class="variant-list" id="variant-list"></div>
+    </div>
 
-      <details class="advanced">
-        <summary>高级选项（默认即可）</summary>
+    <!-- 新建模组向导 -->
+    <div class="view" id="view-create">
+      <div class="page-header"><h2>新建模组</h2></div>
+      <div class="step active" id="step-loader">
+        <p style="font-size:14px;margin-bottom:14px;color:var(--text-muted)">选择模组加载器</p>
+        <div class="cards" id="loader-cards"></div>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="loader-next" disabled>下一步</button>
+        </div>
+      </div>
+      <div class="step" id="step-config" style="display:none">
         <div class="form-group">
-          <label>模组 ID</label>
-          <input id="inp-modid" placeholder="mymod" value="" maxlength="64">
+          <label>模组名字</label>
+          <input id="inp-name" placeholder="我的第一个模组 / My First Mod">
         </div>
         <div class="form-group">
-          <label>Java 包名</label>
-          <input id="inp-group" placeholder="com.example.mymod" value="">
+          <label>Minecraft 版本</label>
+          <select id="sel-mc"></select>
         </div>
-        <div class="form-group" id="mappings-group">
-          <label>映射表</label>
-          <select id="sel-mappings"></select>
+        <div class="form-group">
+          <label>项目路径（默认在 dcml/projects 下）</label>
+          <div class="form-row">
+            <input id="inp-dir" placeholder="加载中…">
+            <button class="btn btn-secondary btn-sm" id="btn-browse" type="button">浏览</button>
+          </div>
+          <div id="dir-preview" style="font-size:12px;color:var(--text-dim);margin-top:6px;font-family:Consolas,monospace"></div>
         </div>
-        <label class="checkbox-row">
-          <input type="checkbox" id="chk-mirror" checked> 使用国内镜像加速
-        </label>
-      </details>
-
-      <div class="btn-group">
-        <button class="btn btn-secondary" id="config-back">返回</button>
-        <button class="btn btn-primary" id="config-gen">一键创建</button>
+        <details class="advanced">
+          <summary>高级选项</summary>
+          <div class="form-group" style="margin-top:12px">
+            <label>模组 ID</label>
+            <input id="inp-modid" placeholder="mymod" maxlength="64">
+          </div>
+          <div class="form-group">
+            <label>Java 包名</label>
+            <input id="inp-group" placeholder="com.example.mymod">
+          </div>
+          <div class="form-group">
+            <label>映射表</label>
+            <select id="sel-mappings"></select>
+          </div>
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-muted);margin-top:10px;cursor:pointer">
+            <input type="checkbox" id="chk-mirror" checked> 使用国内镜像加速
+          </label>
+        </details>
+        <div class="btn-group">
+          <button class="btn btn-secondary" id="config-back">返回</button>
+          <button class="btn btn-primary" id="config-gen">一键创建</button>
+        </div>
+      </div>
+      <div class="step" id="step-gen" style="display:none">
+        <div class="phase-bar">
+          <span class="phase active" id="phase-gen">创建项目</span>
+          <span class="phase" id="phase-build">验证构建</span>
+          <span class="phase" id="phase-client">启动客户端</span>
+          <span class="phase" id="phase-done">完成</span>
+        </div>
+        <p id="gen-hint" style="font-size:13px;color:var(--text-muted);margin-bottom:10px">正在生成…</p>
+        <div class="log" id="gen-log"></div>
+        <div class="btn-group" style="justify-content:center">
+          <button class="btn btn-secondary" id="gen-cancel">取消</button>
+        </div>
       </div>
     </div>
 
-    <!-- Step 3: Generating -->
-    <div class="step" id="step-gen">
-      <div class="phase-bar">
-        <span class="phase" id="phase-gen"><span class="spinner" id="spin-gen"></span>创建项目</span>
-        <span class="phase-arrow">›</span>
-        <span class="phase" id="phase-build">验证构建</span>
-        <span class="phase-arrow">›</span>
-        <span class="phase" id="phase-client">启动客户端</span>
-        <span class="phase-arrow">›</span>
-        <span class="phase" id="phase-done">完成</span>
+    <!-- 外部项目管理 -->
+    <div class="view" id="view-external">
+      <div class="page-header">
+        <div>
+          <h2>外部项目</h2>
+          <p class="sub">管理其它目录中的 mod 项目，支持增删改查</p>
+        </div>
+        <div class="toolbar">
+          <button class="btn btn-secondary btn-sm" id="btn-ext-import">+ 手动导入</button>
+          <button class="btn btn-secondary btn-sm" id="btn-ext-scan-all">扫描全部目录</button>
+          <button class="btn btn-secondary btn-sm" id="btn-ext-purge">清理失效</button>
+        </div>
       </div>
-      <p id="gen-hint">正在下载模板并生成项目，大约 10~30 秒…</p>
-      <div class="log" id="gen-log"></div>
-      <div class="btn-group" style="justify-content:center;">
-        <button class="btn btn-secondary" id="gen-cancel">取消</button>
+      <div class="hint-box">
+        内置项目位于 <code>dcml/projects/</code>，在「我的模组」中管理。
+        此处管理通过监视目录发现或手动导入的<strong>外部项目</strong>。
+        移除后不会删除磁盘文件，且不会被自动扫描重新导入。
       </div>
+      <h3 style="font-size:14px;margin-bottom:8px;color:var(--text-muted)">外部监视目录</h3>
+      <div id="ext-scan-dirs" style="margin-bottom:16px"></div>
+      <button class="btn btn-secondary btn-sm" id="btn-ext-add-dir">+ 添加监视目录</button>
+      <h3 style="font-size:14px;margin:20px 0 8px;color:var(--text-muted)">已注册项目（全部位置）</h3>
+      <div style="overflow-x:auto" id="registry-wrap"></div>
     </div>
 
-    <!-- Step 4: Done -->
-    <div class="step" id="step-done">
-      <div class="done-box">
-        <div class="done-icon">✓</div>
-        <div id="done-title">项目已创建并通过完整验证</div>
-        <p id="done-path"></p>
-        <p>构建与客户端均已验证，可直接用 Cursor / IDEA 打开开始写模组。</p>
+    <!-- 设置 -->
+    <div class="view" id="view-settings">
+      <div class="page-header"><h2>设置</h2></div>
+      <div class="hint-box">
+        「刷新检测」仅校验路径是否还在，不会自动导入新项目。
+        需要发现新文件夹时请用「扫描导入」或外部项目页的「扫描全部目录」。
       </div>
-      <div class="btn-group" style="justify-content:center;">
-        <button class="btn btn-primary" id="done-open-folder">打开文件夹</button>
-        <button class="btn btn-secondary" id="done-close">关闭</button>
+      <div class="form-group">
+        <label>内置模组目录（只读，自动监视）</label>
+        <input id="projects-root" readonly style="opacity:0.85;font-family:Consolas,monospace;font-size:12px">
       </div>
+      <div class="form-group" style="margin-top:16px">
+        <label>额外监视目录</label>
+        <div id="scan-dirs-list" style="margin-bottom:10px"></div>
+        <button class="btn btn-secondary btn-sm" id="btn-add-scan-dir">+ 添加监视目录</button>
+      </div>
+      <div class="form-group" style="margin-top:20px">
+        <label>配置存储（~/.dmcl/workspace.json）</label>
+        <input id="dmcl-dir" readonly style="opacity:0.7;font-family:Consolas,monospace;font-size:12px">
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="queue-bar" id="queue-bar">
+  <span class="spinner"></span>
+  <span id="queue-text">构建队列运行中…</span>
+  <button class="btn btn-secondary btn-sm" id="queue-cancel">取消队列</button>
+</div>
+
+<div class="modal-overlay" id="modal-overlay">
+  <div class="modal">
+    <h3 id="modal-title">日志</h3>
+    <div class="log" id="modal-log"></div>
+    <div class="btn-group" style="justify-content:flex-end;margin-top:12px">
+      <button class="btn btn-secondary btn-sm" id="modal-close">关闭</button>
     </div>
   </div>
 </div>

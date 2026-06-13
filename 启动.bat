@@ -22,6 +22,14 @@ if not exist "node_modules\" (
     )
 )
 
+echo [启动] 正在编译核心模块...
+call npm run build
+if %errorlevel% neq 0 (
+    echo [错误] 核心模块编译失败。
+    pause
+    exit /b 1
+)
+
 echo [启动] 正在编译 GUI...
 call npm run gui:build
 if %errorlevel% neq 0 (
