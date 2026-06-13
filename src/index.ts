@@ -122,7 +122,7 @@ async function downloadAndInjectJdk(javaMajor: number, targetDir: string, log: (
     throw new Error(`查询 JDK ${javaMajor} 下载地址失败，请手动安装：https://adoptium.net`);
   }
 
-  const tmpDir = path.join(os.tmpdir(), `mcdev-jdk-${javaMajor}-${Date.now()}`);
+  const tmpDir = path.join(os.tmpdir(), `dmcl-jdk-${javaMajor}-${Date.now()}`);
   const zipDest = path.join(tmpDir, asset.filename);
   await fs.promises.mkdir(tmpDir, { recursive: true });
 
@@ -264,7 +264,7 @@ async function main(): Promise<void> {
 
   // ---------- 交互模式 ----------
   console.clear();
-  p.intro(pc.bgCyan(pc.black(" mcdev-wizard · Minecraft 模组开发环境一键搭建 ")));
+  p.intro(pc.bgCyan(pc.black(" DMCL · Developer Minecraft Launcher ")));
 
   const loader = (await p.select({
     message: "选择模组加载器",

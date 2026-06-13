@@ -30,7 +30,7 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-echo [启动] 正在打开 mcdev-wizard 窗口...
+echo [启动] 正在打开 DMCL 窗口...
 call npx electron gui/main.js
 if %errorlevel% neq 0 (
     echo [错误] 程序异常退出，请把上方日志截图反馈。

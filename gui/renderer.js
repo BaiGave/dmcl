@@ -1,5 +1,5 @@
 /**
- * mcdev-wizard GUI - 纯前端渲染层
+ * DMCL GUI - 纯前端渲染层
  * 设计原则：用户只需 1) 选加载器 2) 起名字 3) 点一键创建。
  * 其他全部自动：modid/包名自动生成、版本默认最新、目录默认桌面、生成后自动构建验证。
  */
@@ -33,7 +33,7 @@
     var txt = $("error-text");
     if (txt) txt.textContent = msg;
     if (box) box.style.display = "block";
-    console.error("[mcdev]", msg);
+    console.error("[dmcl]", msg);
   }
 
   function hideError() {
@@ -477,5 +477,5 @@
     });
   }
 
-  console.log("[mcdev] Renderer ready ✓");
+  console.log("[dmcl] Renderer ready ✓");
 })();

@@ -1,10 +1,10 @@
 {
-  "name": "mcdev-wizard",
+  "name": "dmcl",
   "version": "0.1.0",
-  "description": "一键搭建 Minecraft 模组开发环境的脚手架 CLI（支持 Fabric / Forge / NeoForge）",
+  "description": "DMCL (Developer Minecraft Launcher) — Minecraft 模组开发环境一键搭建",
   "type": "module",
   "bin": {
-    "mcdev": "dist/index.js"
+    "dmcl": "dist/index.js"
   },
   "scripts": {
     "dev": "tsx src/index.ts",

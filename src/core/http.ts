@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-export const UA = "mcdev-wizard (https://github.com/mcdev-wizard)";
+export const UA = "DMCL/0.1 (https://github.com/BaiGave/dmcl)";
 
 interface FetchOpts {
   retries?: number;

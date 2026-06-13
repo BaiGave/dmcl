@@ -227,13 +227,13 @@ function createWindow(): void {  mainWindow = new BrowserWindow({
     width: 680,
     height: 720,
     resizable: true,
-    title: "mcdev-wizard",
+    title: "DMCL",
     autoHideMenuBar: true,
   });
 
   mainWindow.loadURL(`http://localhost:${PORT}`);
 
-  if (process.env.MCDEV_DEBUG) {
+  if (process.env.DMCL_DEBUG) {
     mainWindow.webContents.openDevTools();
   }
 

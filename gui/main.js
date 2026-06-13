@@ -225,11 +225,11 @@ function createWindow() {
         width: 680,
         height: 720,
         resizable: true,
-        title: "mcdev-wizard",
+        title: "DMCL",
         autoHideMenuBar: true,
     });
     mainWindow.loadURL(`http://localhost:${PORT}`);
-    if (process.env.MCDEV_DEBUG) {
+    if (process.env.DMCL_DEBUG) {
         mainWindow.webContents.openDevTools();
     }
     // 拦截 _blank 链接在外部浏览器打开

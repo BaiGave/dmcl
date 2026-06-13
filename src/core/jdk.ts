@@ -5,7 +5,9 @@ import path from "node:path";
 import AdmZip from "adm-zip";
 import { fetchJson, UA } from "./http.js";
 
-const JDK_CACHE = path.join(os.homedir(), ".mcdev", "jdks");
+const JDK_CACHE = path.join(os.homedir(), ".dmcl", "jdks");
+/** 旧版缓存目录，只读兼容 */
+const LEGACY_JDK_CACHE = path.join(os.homedir(), ".mcdev", "jdks");
 const UA_HEADER = { "user-agent": UA };
 
 interface AdoptiumAsset {
@@ -148,11 +150,13 @@ export async function downloadWithProgress(
   await fs.promises.writeFile(dest, Buffer.concat(chunks));
 }
 
-/** 检查缓存，返回已下载的 JDK 路径 */
+/** 检查缓存，返回已下载的 JDK 路径（优先 ~/.dmcl，兼容 ~/.mcdev） */
 export function findCachedJdk(javaMajor: number): string | null {
-  const dir = path.join(JDK_CACHE, String(javaMajor));
-  if (!fs.existsSync(path.join(dir, "bin"))) return null;
-  return dir;
+  for (const base of [JDK_CACHE, LEGACY_JDK_CACHE]) {
+    const dir = path.join(base, String(javaMajor));
+    if (fs.existsSync(path.join(dir, "bin"))) return dir;
+  }
+  return null;
 }
 
 /** 解压 JDK zip，返回解压后的根目录路径 */

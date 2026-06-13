@@ -34,7 +34,7 @@ export async function scaffoldForge(opts: ProjectOptions, log: Logger): Promise<
     mod_group_id: opts.group,
     mod_version: "0.1.0",
     mod_authors: "YourName",
-    mod_description: `${opts.displayName} - 使用 mcdev-wizard 生成`,
+    mod_description: `${opts.displayName} - 使用 DMCL 生成`,
   });
   if (patched.length > 0) log(`已更新 gradle.properties（${patched.join(", ")}）`);
 

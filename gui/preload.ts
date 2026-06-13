@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 
-contextBridge.exposeInMainWorld("mcdev", {
+contextBridge.exposeInMainWorld("dmcl", {
   generate: (args: string[]) => ipcRenderer.invoke("gen:run", args),
   onProgress: (cb: (line: string) => void) => {
     ipcRenderer.on("gen:line", (_e, line) => cb(line));

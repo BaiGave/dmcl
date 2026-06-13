@@ -8,7 +8,7 @@ import type { ProjectOptions } from "../types.js";
 
 /** 下载 zip 并解压到目标目录；若 zip 仅含一个顶层目录（GitHub 归档）则自动剥掉 */
 export async function downloadAndExtract(url: string, targetDir: string): Promise<void> {
-  const tmp = path.join(os.tmpdir(), `mcdev-${Date.now()}.zip`);
+  const tmp = path.join(os.tmpdir(), `dmcl-${Date.now()}.zip`);
   try {
     await downloadFile(url, tmp);
     const zip = new AdmZip(tmp);
