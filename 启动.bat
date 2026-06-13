@@ -12,6 +12,8 @@ if %errorlevel% neq 0 (
 
 if not exist "node_modules\" (
     echo [首次运行] 正在安装依赖，请稍候...
+    rem Electron 二进制走国内镜像，避免下载卡死
+    set ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
     call npm install
     if %errorlevel% neq 0 (
         echo [错误] 依赖安装失败，请检查网络后重试。
@@ -30,4 +32,7 @@ if %errorlevel% neq 0 (
 
 echo [启动] 正在打开 mcdev-wizard 窗口...
 call npx electron gui/main.js
-pause
+if %errorlevel% neq 0 (
+    echo [错误] 程序异常退出，请把上方日志截图反馈。
+    pause
+)

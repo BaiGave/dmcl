@@ -94,6 +94,33 @@ export async function fetchJdkDownloadUrl(javaMajor: number): Promise<{
   }
 }
 
+/**
+ * 清华 TUNA 的 Adoptium 镜像地址（国内速度快且稳定）。
+ * 路径格式：/Adoptium/{major}/jdk/{arch}/{os}/{filename}
+ */
+export function jdkMirrorUrl(javaMajor: number, filename: string): string {
+  return `https://mirrors.tuna.tsinghua.edu.cn/Adoptium/${javaMajor}/jdk/${currentArch()}/${currentOs()}/${filename}`;
+}
+
+/** 依次尝试多个 URL 下载，全部失败才抛错 */
+export async function downloadWithFallback(
+  urls: string[],
+  dest: string,
+  totalBytes: number,
+  onProgress: (pct: number) => void,
+): Promise<void> {
+  let lastErr: Error | null = null;
+  for (const url of urls) {
+    try {
+      await downloadWithProgress(url, dest, totalBytes, onProgress);
+      return;
+    } catch (err) {
+      lastErr = err as Error;
+    }
+  }
+  throw lastErr ?? new Error("下载失败");
+}
+
 /** 流式下载文件，每 2 MB 回调一次进度 */
 export async function downloadWithProgress(
   url: string,
@@ -114,7 +141,8 @@ export async function downloadWithProgress(
     if (done) break;
     chunks.push(value);
     downloaded += value.length;
-    onProgress(Math.round((downloaded / totalBytes) * 100));
+    // 镜像源文件大小可能与 API 报告值略有出入，封顶 100
+    onProgress(Math.min(100, Math.round((downloaded / totalBytes) * 100)));
   }
   await fs.promises.mkdir(path.dirname(dest), { recursive: true });
   await fs.promises.writeFile(dest, Buffer.concat(chunks));

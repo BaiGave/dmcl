@@ -18,15 +18,16 @@ import { applyChinaMirror } from "./core/mirror.js";
 import { writeCursorConfig } from "./core/vscode.js";
 import {
   detectJavaMajor,
-  downloadWithProgress,
+  downloadWithFallback,
   extractJdk,
   fetchJdkDownloadUrl,
   findCachedJdk,
   injectJdkHome,
+  jdkMirrorUrl,
   requiredJavaFor,
 } from "./core/jdk.js";
 import { injectBuildscriptMirrors, injectMavenMirrors } from "./core/maven.js";
-import { runGradleBuild } from "./core/build.js";
+import { runGradleBuild, runGradleClientVerify } from "./core/build.js";
 
 const MOD_ID_RE = /^[a-z][a-z0-9_]{1,63}$/;
 const GROUP_RE = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/;
@@ -97,7 +98,7 @@ async function handleJdkInteractive(opts: ProjectOptions, log: (msg: string) => 
   await downloadAndInjectJdk(java, opts.targetDir, log);
 }
 
-/** 非交互模式 JDK 处理：有缓存直接用，否则跳过（由用户自行解决） */
+/** 非交互模式 JDK 处理：有缓存直接用，没有就自动下载（GUI 场景不能问用户） */
 async function handleJdkNonInteractive(opts: ProjectOptions, log: (msg: string) => void): Promise<void> {
   const java = requiredJavaFor(opts.mcVersion);
   const detected = detectJavaMajor();
@@ -109,14 +110,16 @@ async function handleJdkNonInteractive(opts: ProjectOptions, log: (msg: string) 
     await injectJdkHome(opts.targetDir, cached);
     return;
   }
-  // 非交互模式跳过，由 printNextSteps 提示
+
+  const label = detected === null ? "未检测到 Java" : `当前 Java ${detected} 过旧`;
+  log(`${label}，自动下载 JDK ${java}（约 200 MB，仅首次需要）…`);
+  await downloadAndInjectJdk(java, opts.targetDir, log);
 }
 
 async function downloadAndInjectJdk(javaMajor: number, targetDir: string, log: (msg: string) => void): Promise<void> {
   const asset = await fetchJdkDownloadUrl(javaMajor);
   if (!asset) {
-    log(`查询 JDK ${javaMajor} 下载地址失败，请手动安装：https://adoptium.net`);
-    return;
+    throw new Error(`查询 JDK ${javaMajor} 下载地址失败，请手动安装：https://adoptium.net`);
   }
 
   const tmpDir = path.join(os.tmpdir(), `mcdev-jdk-${javaMajor}-${Date.now()}`);
@@ -124,8 +127,14 @@ async function downloadAndInjectJdk(javaMajor: number, targetDir: string, log: (
   await fs.promises.mkdir(tmpDir, { recursive: true });
 
   log(`下载 JDK ${javaMajor} ${asset.versionLabel}（${(asset.sizeBytes / 1024 / 1024).toFixed(0)} MB）…`);
-  await downloadWithProgress(asset.url, zipDest, asset.sizeBytes, (pct) => {
-    log(`下载 JDK ${pct}%`);
+  let lastPct = -10;
+  // 优先清华镜像（国内快且稳），失败回退 Adoptium 官方源
+  const urls = [jdkMirrorUrl(javaMajor, asset.filename), asset.url];
+  await downloadWithFallback(urls, zipDest, asset.sizeBytes, (pct) => {
+    if (pct >= lastPct + 10 || (pct === 100 && lastPct !== 100)) {
+      lastPct = pct;
+      log(`下载 JDK ${pct}%`);
+    }
   });
 
   log("解压 JDK…");
@@ -209,9 +218,6 @@ function bail(message: string): never {
 async function main(): Promise<void> {
   const args = parseCli();
 
-  console.clear();
-  p.intro(pc.bgCyan(pc.black(" mcdev-wizard · Minecraft 模组开发环境一键搭建 ")));
-
   // ---------- 非交互模式 ----------
   if (args.yes) {
     if (!args.loader || !args.mc || !args.modid) {
@@ -235,21 +241,31 @@ async function main(): Promise<void> {
       mirror: !args["no-mirror"],
       mappings: mappingsRaw as MappingsId,
     };
-    const s = p.spinner();
-    s.start("正在生成项目");
-    await scaffold(opts, (msg) => s.message(msg));
-    s.message("检查 JDK…");
-    await handleJdkNonInteractive(opts, (msg) => s.message(msg));
-    s.stop(`项目已生成：${opts.targetDir}`);
-    if (args.build) {
-      await runGradleBuild(opts.targetDir, console.log);
+    // GUI/管道场景下 spinner 输出不可靠，直接逐行打印
+    const log = (msg: string) => console.log(msg);
+    log("正在生成项目…");
+    await scaffold(opts, log);
+    log("检查 JDK…");
+    try {
+      await handleJdkNonInteractive(opts, log);
+    } catch (err) {
+      log(`JDK 配置失败：${(err as Error).message}`);
+      process.exit(1);
     }
-    printNextSteps(opts);
-    p.outro("完成");
+    log(`✔ 项目已生成：${opts.targetDir}`);
+    if (args.build) {
+      const buildCode = await runGradleBuild(opts.targetDir, log);
+      if (buildCode === 0) {
+        await runGradleClientVerify(opts.targetDir, log);
+      }
+    }
     return;
   }
 
   // ---------- 交互模式 ----------
+  console.clear();
+  p.intro(pc.bgCyan(pc.black(" mcdev-wizard · Minecraft 模组开发环境一键搭建 ")));
+
   const loader = (await p.select({
     message: "选择模组加载器",
     options: [
@@ -366,12 +382,15 @@ async function main(): Promise<void> {
 
   // 询问是否立即构建验证
   const doBuild = await p.confirm({
-    message: "是否立即運行 gradlew build 驗證？（首次需下載 Minecraft，約 5~20 分鐘）",
+    message: "是否立即运行 gradlew build 验证？（首次需下载 Minecraft，约 5~20 分钟）",
     initialValue: false,
   });
   if (!p.isCancel(doBuild) && doBuild) {
-    p.intro(pc.bgCyan(pc.black(" 構建驗證 ")));
-    await runGradleBuild(opts.targetDir, console.log);
+    p.intro(pc.bgCyan(pc.black(" 构建验证 ")));
+    const buildCode = await runGradleBuild(opts.targetDir, console.log);
+    if (buildCode === 0) {
+      await runGradleClientVerify(opts.targetDir, console.log);
+    }
   }
 
   printNextSteps(opts);

@@ -9,5 +9,5 @@
     "skipLibCheck": true,
     "resolveJsonModule": true
   },
-  "files": ["main.ts"]
+  "files": ["main.ts", "gradle.ts"]
 }
