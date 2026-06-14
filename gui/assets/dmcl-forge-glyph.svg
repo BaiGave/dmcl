@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="DMCL">
+  <rect width="64" height="64" rx="8" fill="#101510"/>
+  <rect x="8" y="8" width="48" height="48" fill="#253022"/>
+  <rect x="8" y="8" width="48" height="16" fill="#6fb24f"/>
+  <rect x="14" y="12" width="8" height="8" fill="#98d56c"/>
+  <rect x="30" y="10" width="10" height="8" fill="#88c85e"/>
+  <rect x="46" y="14" width="6" height="6" fill="#b5e17c"/>
+  <rect x="8" y="24" width="16" height="16" fill="#8a5f3c"/>
+  <rect x="24" y="24" width="16" height="16" fill="#744b31"/>
+  <rect x="40" y="24" width="16" height="16" fill="#8a5f3c"/>
+  <rect x="8" y="40" width="16" height="16" fill="#6e472e"/>
+  <rect x="24" y="40" width="16" height="16" fill="#8a5f3c"/>
+  <rect x="40" y="40" width="16" height="16" fill="#6e472e"/>
+  <rect x="18" y="33" width="28" height="6" fill="#d7a34b"/>
+  <rect x="40" y="27" width="6" height="18" fill="#d7a34b"/>
+  <rect x="14" y="30" width="10" height="4" fill="#f0c878"/>
+  <rect x="44" y="24" width="8" height="8" fill="#f0c878"/>
+  <rect x="20" y="45" width="6" height="6" fill="#6da4dd"/>
+  <rect x="28" y="45" width="6" height="6" fill="#6da4dd"/>
+  <rect x="36" y="45" width="6" height="6" fill="#6da4dd"/>
+  <path d="M20 20h7v4h-7v16h7v4h-7c-2 0-4-2-4-4V24c0-2 2-4 4-4Zm24 0h-7v4h7v16h-7v4h7c2 0 4-2 4-4V24c0-2-2-4-4-4Z" fill="#f1f4e9"/>
+</svg>

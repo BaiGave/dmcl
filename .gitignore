@@ -7,3 +7,5 @@ _test_*.ts
 test_*.txt
 _e2e_/
 _e2e_req.json
+
+projects/*/

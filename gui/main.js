@@ -296,6 +296,7 @@ function serveGui(req, res) {
             ".css": "text/css; charset=utf-8",
             ".json": "application/json",
             ".png": "image/png",
+            ".svg": "image/svg+xml; charset=utf-8",
         };
         res.writeHead(200, {
             "Content-Type": mime[ext] ?? "text/plain",
