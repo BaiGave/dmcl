@@ -1,9 +1,14 @@
-import path from "node:path";
+﻿import path from "node:path";
 import { urlExists } from "../core/http.js";
 import { adaptTemplate, downloadAndExtract } from "../core/template.js";
 import { patchProperties } from "../core/fsutils.js";
 import { applyMappings } from "../core/mappings.js";
-import { fetchNeoForgeVersions, neoMdkZipCandidates, pickNeoForgeVersion } from "../meta/neoforge.js";
+import {
+  fetchNeoForgeVersions,
+  neoMdkZipCandidates,
+  neoMdkFallbackCandidates,
+  pickNeoForgeVersion,
+} from "../meta/neoforge.js";
 import type { Logger, ProjectOptions } from "../types.js";
 
 export async function scaffoldNeoForge(opts: ProjectOptions, log: Logger): Promise<void> {
@@ -14,10 +19,21 @@ export async function scaffoldNeoForge(opts: ProjectOptions, log: Logger): Promi
   }
 
   let zipUrl: string | null = null;
+  // 1) 精确版本仓库
   for (const url of neoMdkZipCandidates(opts.mcVersion)) {
     if (await urlExists(url)) {
       zipUrl = url;
       break;
+    }
+  }
+  // 2) 回退：用邻近较高 patch 版本的 MDK 模板（ModDevGradle 在同 minor 系内兼容）
+  if (!zipUrl) {
+    for (const url of neoMdkFallbackCandidates(opts.mcVersion)) {
+      if (await urlExists(url)) {
+        log(`未找到精确版本仓库，使用邻近版本 MDK 模板作为回退`);
+        zipUrl = url;
+        break;
+      }
     }
   }
   if (!zipUrl) {

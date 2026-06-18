@@ -10,9 +10,14 @@
     "resolveJsonModule": true
   },
   "files": [
+    "dist-loader.ts",
+    "gradle-core-bridge.ts",
     "main.ts",
     "gradle.ts",
     "gradle-runner.ts",
+    "cpu-concurrency.ts",
+    "concurrency-settings.ts",
+    "concurrency-governor.ts",
     "build-queue.ts",
     "workspace-api.ts",
     "preload-bridge.ts"

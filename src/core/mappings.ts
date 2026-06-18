@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { patchProperties } from "./fsutils.js";
+import { isUnobfuscatedMc } from "../meta/mc-version.js";
 import { fetchParchmentVersion } from "../meta/parchment.js";
 import type { Logger, ProjectOptions } from "../types.js";
 
@@ -17,6 +18,11 @@ export async function applyMappings(opts: ProjectOptions, log: Logger): Promise<
 }
 
 async function applyFabricMappings(opts: ProjectOptions, log: Logger): Promise<void> {
+  if (isUnobfuscatedMc(opts.mcVersion)) {
+    log("此版本官方未混淆，无需配置映射表");
+    return;
+  }
+
   const propsFile = path.join(opts.targetDir, "gradle.properties");
   const settingsFile = path.join(opts.targetDir, "settings.gradle");
 

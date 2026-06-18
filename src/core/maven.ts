@@ -8,6 +8,40 @@ const MIRRORS: Array<{ name: string; url: string }> = [
   { name: "Alibaba", url: "https://maven.aliyun.com/repository/public" },
 ];
 
+/** 从 openBrace 的 `{` 起找匹配的 `}`，跳过字符串与注释 */
+function findMatchingBraceEnd(content: string, openBracePos: number): number {
+  let depth = 1;
+  let i = openBracePos + 1;
+  while (i < content.length && depth > 0) {
+    const ch = content[i];
+    if (ch === "/" && content[i + 1] === "/") {
+      i += 2;
+      while (i < content.length && content[i] !== "\n") i++;
+      continue;
+    }
+    if (ch === "/" && content[i + 1] === "*") {
+      i += 2;
+      while (i < content.length - 1 && !(content[i] === "*" && content[i + 1] === "/")) i++;
+      i += 2;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      const quote = ch;
+      i++;
+      while (i < content.length && content[i] !== quote) {
+        if (content[i] === "\\") i++;
+        i++;
+      }
+      i++;
+      continue;
+    }
+    if (ch === "{") depth++;
+    else if (ch === "}") depth--;
+    i++;
+  }
+  return i;
+}
+
 /**
  * 在 settings.gradle / build.gradle 中注入国内 Maven 镜像。
  * 策略：在已有的 repositories {} 顶部插入 mirror，覆盖默认 Maven Central。
@@ -66,18 +100,36 @@ export async function injectBuildscriptMirrors(targetDir: string, log: Logger): 
     (m) => `        maven { url "${m.url}" }`,
   ).join("\n");
 
-  // buildscript.repositories { } 注入
-  content = content.replace(
-    /(buildscript\s*\{[\s\S]*?repositories\s*\{)/,
+  const bsBlocks: string[] = [];
+  let processed = "";
+  let cursor = 0;
+  const bsStart = /buildscript\s*\{/g;
+  let match: RegExpExecArray | null;
+  while ((match = bsStart.exec(content)) !== null) {
+    processed += content.slice(cursor, match.index);
+    const openBrace = match.index + match[0].length - 1;
+    const end = findMatchingBraceEnd(content, openBrace);
+    const block = content.slice(match.index, end);
+    const injected = block.replace(
+      /(repositories\s*\{)/,
+      `$1\n${snippet}`,
+    );
+    bsBlocks.push(injected);
+    processed += `__DMCL_BS_${bsBlocks.length - 1}__`;
+    cursor = end;
+    bsStart.lastIndex = end;
+  }
+  processed += content.slice(cursor);
+
+  // Inject mirror into standalone repositories (not inside buildscript)
+  processed = processed.replace(
+    /(repositories\s*\{)/,
     `$1\n${snippet}`,
   );
 
-  // 普通 repositories { } 注入（避免重复）
-  content = content.replace(
-    /(?<!buildscript\s*\{[\s\S]*)(repositories\s*\{)/,
-    `$1\n${snippet}`,
-  );
+  // Reassemble: restore buildscript blocks
+  content = processed.replace(/__DMCL_BS_(\d+)__/g, (_m, idx) => bsBlocks[Number(idx)]);
 
   await fs.promises.writeFile(buildFile, content, "utf8");
-  log("build.gradle 仓库已注入国内镜像");
+  log("build.gradle 已注入 Maven 镜像");
 }

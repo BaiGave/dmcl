@@ -10,8 +10,13 @@
     "dev": "tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "gui:build": "tsc -p gui/tsconfig.json",
-    "gui": "npm run build && npm run gui:build && npx electron gui/main.js"
+    "test": "npm run build && tsx --test tests/**/*.test.ts",
+    "verify:all": "tsx src/index.ts --verify-all",
+    "verify:all:force": "tsx src/index.ts --verify-all --verify-force",
+    "renderer:extract": "node scripts/extract-renderer.mjs",
+    "gui:bundle": "esbuild gui/renderer-src/main.ts --bundle --outfile=gui/renderer.js --format=iife --target=es2020",
+    "gui:build": "tsc -p gui/tsconfig.json && npm run gui:bundle",
+    "gui": "npm run build && npm run gui:build && node ./node_modules/electron/cli.js gui/main.js"
   },
   "engines": {
     "node": ">=18"
@@ -26,6 +31,7 @@
     "@types/adm-zip": "^0.5.8",
     "@types/node": "^25.9.2",
     "electron": "^42.4.0",
+    "esbuild": "^0.28.1",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3"
   }

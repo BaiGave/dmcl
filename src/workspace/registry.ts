@@ -31,7 +31,7 @@ export function listRegisteredProjects(store: WorkspaceStore): ExternalProjectEn
         loader: v.loader,
         mcVersion: v.mcVersion,
         projectPath: v.projectPath,
-        pathMissing: !!v.pathMissing,
+        pathMissing: false,
         source: v.source,
         isBuiltin: resolved.toLowerCase().startsWith(projectsRoot + path.sep)
           || resolved.toLowerCase() === projectsRoot,

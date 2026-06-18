@@ -38,17 +38,19 @@ export async function fetchText(url: string, opts?: FetchOpts): Promise<string> 
 }
 
 export async function urlExists(url: string): Promise<boolean> {
-  // 注意：codeload.github.com 等服务对 HEAD 一律返回 404，必须用 GET 验证
+  // ???codeload.github.com ???? HEAD ???? 404???? GET ??
+  const signal = AbortSignal.timeout(15_000);
   try {
-    const head = await fetch(url, { method: "HEAD", redirect: "follow", headers: { "user-agent": UA } });
+    const head = await fetch(url, { method: "HEAD", redirect: "follow", headers: { "user-agent": UA }, signal });
     if (head.ok) return true;
   } catch {
-    // 忽略，继续用 GET 判断
+    // ?????? GET ??
   }
   try {
     const res = await fetch(url, {
       redirect: "follow",
       headers: { "user-agent": UA, range: "bytes=0-0" },
+      signal,
     });
     await res.body?.cancel();
     return res.ok;

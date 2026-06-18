@@ -43,11 +43,66 @@ const node_child_process_1 = require("node:child_process");
 const node_fs_1 = __importDefault(require("node:fs"));
 const node_path_1 = __importDefault(require("node:path"));
 const build_queue_1 = require("./build-queue");
+const dist_loader_1 = require("./dist-loader");
+function parseLoaderParam(value) {
+    if (value === "fabric" || value === "forge" || value === "neoforge")
+        return value;
+    return undefined;
+}
+function parseLimitParam(value) {
+    if (!value)
+        return undefined;
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+}
+function compareMcVersion(a, b) {
+    const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
+    const pb = b.split(".").map((n) => parseInt(n, 10) || 0);
+    const len = Math.max(pa.length, pb.length);
+    for (let i = 0; i < len; i++) {
+        const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
+        if (diff !== 0)
+            return diff;
+    }
+    return 0;
+}
+function sortVariantsForBuild(variants) {
+    return [...variants].sort((a, b) => {
+        const mc = compareMcVersion(b.mcVersion, a.mcVersion);
+        if (mc !== 0)
+            return mc;
+        return a.loader.localeCompare(b.loader);
+    });
+}
+function pickBuildableVariants(variants, opts) {
+    const skipped = { queued: 0, missing: 0, filtered: 0 };
+    const buildable = [];
+    for (const v of variants) {
+        if (opts.loader && v.loader !== opts.loader) {
+            skipped.filtered++;
+            continue;
+        }
+        if (opts.failedOnly && v.buildStatus !== "failed") {
+            skipped.filtered++;
+            continue;
+        }
+        if (!node_fs_1.default.existsSync(v.projectPath)) {
+            skipped.missing++;
+            continue;
+        }
+        if ((0, build_queue_1.isVariantQueued)(v.id)) {
+            skipped.queued++;
+            continue;
+        }
+        buildable.push(v);
+    }
+    return { buildable: sortVariantsForBuild(buildable), skipped };
+}
 let wsMod = null;
 async function ws() {
     if (!wsMod) {
         const projectRoot = node_path_1.default.resolve(__dirname, "..");
-        wsMod = await Promise.resolve(`${node_path_1.default.join(projectRoot, "dist", "workspace", "index.js")}`).then(s => __importStar(require(s)));
+        wsMod = await (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("workspace", "index.js"));
     }
     return wsMod;
 }
@@ -77,7 +132,7 @@ async function handleWorkspaceApi(req, res, urlPath, method) {
     const store = mod.getWorkspace();
     // GET /api/mods
     if (urlPath === "/api/mods" && method === "GET") {
-        mod.reconcileWorkspace(store);
+        store.refresh();
         json(res, { mods: store.getMods() });
         return true;
     }
@@ -95,7 +150,7 @@ async function handleWorkspaceApi(req, res, urlPath, method) {
     }
     // GET /api/registry/projects
     if (urlPath === "/api/registry/projects" && method === "GET") {
-        mod.reconcileWorkspace(store);
+        store.refresh();
         json(res, { projects: mod.listRegisteredProjects(store) });
         return true;
     }
@@ -107,12 +162,28 @@ async function handleWorkspaceApi(req, res, urlPath, method) {
         });
         return true;
     }
+    // GET /api/concurrency
+    if (urlPath === "/api/concurrency" && method === "GET") {
+        const { getConcurrencySettingsPayload } = await Promise.resolve().then(() => __importStar(require("./concurrency-settings")));
+        const { getGovernorStatus } = await Promise.resolve().then(() => __importStar(require("./concurrency-governor")));
+        json(res, { ...getConcurrencySettingsPayload(), ...getGovernorStatus() });
+        return true;
+    }
     // GET /api/paths/default-variant?modId=&loader=&mc=
     if (urlPath.startsWith("/api/paths/default-variant") && method === "GET") {
         const q = new URL(urlPath, "http://localhost").searchParams;
-        const modId = q.get("modId") ?? "mymod";
+        const modId = (q.get("modId") ?? "").trim();
         const loader = (q.get("loader") ?? "fabric");
         const mc = q.get("mc") ?? "1.21.4";
+        if (!mod.isValidModId(modId)) {
+            json(res, {
+                path: null,
+                invalidModId: true,
+                projectsRoot: mod.getProjectsRoot(),
+                preview: `projects/{modId}/${loader}-${mc}/`,
+            });
+            return true;
+        }
         const variantPath = mod.defaultVariantPath(modId, loader, mc);
         json(res, {
             path: variantPath,
@@ -140,7 +211,7 @@ async function handleWorkspaceApi(req, res, urlPath, method) {
     // GET /api/mods/:id
     const modMatch = urlPath.match(/^\/api\/mods\/([^/]+)$/);
     if (modMatch && method === "GET") {
-        mod.reconcileWorkspace(store);
+        store.refresh();
         const m = store.getMod(modMatch[1]);
         if (!m) {
             json(res, { error: "模组不存在" }, 404);
@@ -162,20 +233,41 @@ async function handleWorkspaceApi(req, res, urlPath, method) {
     }
     // DELETE /api/mods/:id
     if (modMatch && method === "DELETE") {
+        const body = (await readBody(req));
+        const deleteFiles = body?.deleteFiles === true;
+        const m = store.getMod(modMatch[1]);
+        if (!m) {
+            json(res, { error: "模组不存在" }, 404);
+            return true;
+        }
+        let fileResult;
+        if (deleteFiles) {
+            const deletedOnDisk = await mod.deleteModProjects(m.modId, m.variants.map((v) => v.projectPath));
+            fileResult = deletedOnDisk;
+            if (deletedOnDisk.skipped.length > 0) {
+                json(res, {
+                    error: `有 ${deletedOnDisk.skipped.length} 个项目目录未能删除，请关闭占用程序后重试`,
+                    fileResult: deletedOnDisk,
+                }, 500);
+                return true;
+            }
+        }
         const ok = store.removeMod(modMatch[1]);
-        json(res, { ok });
+        mod.invalidateMatrixCache(m.modId);
+        json(res, { ok, deleteFiles, fileResult, mods: store.getMods() });
         return true;
     }
     // GET /api/mods/:id/matrix
     const matrixMatch = urlPath.match(/^\/api\/mods\/([^/]+)\/matrix$/);
     if (matrixMatch && method === "GET") {
+        store.refresh();
         const m = store.getMod(matrixMatch[1]);
         if (!m) {
             json(res, { error: "模组不存在" }, 404);
             return true;
         }
         const matrix = await mod.buildMatrix(m);
-        json(res, matrix);
+        json(res, mod.serializeMatrixResult(matrix));
         return true;
     }
     // POST /api/mods/:id/variants
@@ -215,6 +307,8 @@ async function handleWorkspaceApi(req, res, urlPath, method) {
                     variantId: variant.id,
                     projectPath: variant.projectPath,
                     type: "build+run",
+                    loader: variant.loader,
+                    mcVersion: variant.mcVersion,
                 });
                 log("已加入构建队列");
             }
@@ -231,8 +325,40 @@ async function handleWorkspaceApi(req, res, urlPath, method) {
     // DELETE /api/mods/:modId/variants/:variantId
     const variantDelMatch = urlPath.match(/^\/api\/mods\/([^/]+)\/variants\/([^/]+)$/);
     if (variantDelMatch && method === "DELETE") {
+        const body = (await readBody(req));
+        const deleteFiles = body?.deleteFiles === true;
+        const m = store.getMod(variantDelMatch[1]);
+        if (!m) {
+            json(res, { error: "模组不存在" }, 404);
+            return true;
+        }
+        const variant = m.variants.find((v) => v.id === variantDelMatch[2]);
+        if (!variant) {
+            json(res, { error: "变体不存在" }, 404);
+            return true;
+        }
+        if (deleteFiles) {
+            try {
+                await mod.deleteVariantProject(variant.projectPath, m.modId, m.variants.map((v) => v.projectPath));
+            }
+            catch (err) {
+                json(res, { error: err.message }, 400);
+                return true;
+            }
+        }
         const ok = store.removeVariant(variantDelMatch[1], variantDelMatch[2]);
-        json(res, { ok });
+        if (!ok) {
+            json(res, { error: "变体登记移除失败" }, 500);
+            return true;
+        }
+        const updated = store.getMod(variantDelMatch[1]);
+        json(res, {
+            ok: true,
+            deleteFiles,
+            path: variant.projectPath,
+            mod: updated ?? null,
+            mods: store.getMods(),
+        });
         return true;
     }
     // POST /api/mods/import
@@ -270,7 +396,12 @@ async function handleWorkspaceApi(req, res, urlPath, method) {
         let m = store.findModByModId(body.modId);
         if (!m) {
             try {
-                m = store.createMod({ modId: body.modId, displayName: body.displayName });
+                const modDir = mod.inferModDir(node_path_1.default.resolve(body.projectPath), body.modId);
+                m = store.createMod({
+                    modId: body.modId,
+                    displayName: body.displayName,
+                    modDir,
+                });
             }
             catch (err) {
                 json(res, { error: err.message }, 400);
@@ -297,13 +428,35 @@ async function handleWorkspaceApi(req, res, urlPath, method) {
     }
     // GET /api/settings
     if (urlPath === "/api/settings" && method === "GET") {
+        const { getConcurrencySettingsPayload } = await Promise.resolve().then(() => __importStar(require("./concurrency-settings")));
         json(res, {
             scanDirs: store.getScanDirs(),
             excludedPaths: store.getExcludedPaths(),
             dmclDir: mod.getDmclDir(),
             projectsRoot: mod.getProjectsRoot(),
             repoRoot: mod.getRepoRoot(),
+            concurrency: getConcurrencySettingsPayload(),
         });
+        return true;
+    }
+    // POST /api/settings/concurrency
+    if (urlPath === "/api/settings/concurrency" && method === "POST") {
+        const body = (await readBody(req));
+        const { resetRunnerPool } = await Promise.resolve().then(() => __importStar(require("./gradle-runner")));
+        const { applyConcurrencyUserSettings, resetConcurrencyToDefaults, } = await Promise.resolve().then(() => __importStar(require("./concurrency-governor")));
+        const { getConcurrencySettingsPayload } = await Promise.resolve().then(() => __importStar(require("./concurrency-settings")));
+        if (body.reset) {
+            resetConcurrencyToDefaults();
+        }
+        else {
+            applyConcurrencyUserSettings({
+                jobSlots: body.jobSlots,
+                gradleBuildConcurrency: body.gradleBuildConcurrency,
+                clientConcurrency: body.clientConcurrency,
+            });
+        }
+        resetRunnerPool();
+        json(res, { ok: true, concurrency: getConcurrencySettingsPayload() });
         return true;
     }
     // POST /api/settings/scan-dirs
@@ -341,15 +494,13 @@ async function handleWorkspaceApi(req, res, urlPath, method) {
             json(res, { error: "变体不存在" }, 404);
             return true;
         }
-        if (found.variant.pathMissing) {
-            json(res, { error: "项目目录不存在，请先重新定位" }, 400);
-            return true;
-        }
         store.updateVariantBuildStatus(buildMatch[1], "building");
         const jobId = (0, build_queue_1.enqueueBuild)({
             variantId: buildMatch[1],
             projectPath: found.variant.projectPath,
             type: body.runClient ? "build+run" : "build",
+            loader: found.variant.loader,
+            mcVersion: found.variant.mcVersion,
         });
         json(res, { jobId, queue: (0, build_queue_1.getQueueStatus)() });
         return true;
@@ -362,10 +513,13 @@ async function handleWorkspaceApi(req, res, urlPath, method) {
             json(res, { error: "变体不存在" }, 404);
             return true;
         }
+        store.updateVariantBuildStatus(runMatch[1], "building");
         const jobId = (0, build_queue_1.enqueueBuild)({
             variantId: runMatch[1],
             projectPath: found.variant.projectPath,
             type: "run",
+            loader: found.variant.loader,
+            mcVersion: found.variant.mcVersion,
         });
         json(res, { jobId, queue: (0, build_queue_1.getQueueStatus)() });
         return true;
@@ -373,19 +527,21 @@ async function handleWorkspaceApi(req, res, urlPath, method) {
     // GET /api/variants/:id/logs
     const logsMatch = urlPath.match(/^\/api\/variants\/([^/]+)\/logs$/);
     if (logsMatch && method === "GET") {
-        json(res, { logs: (0, build_queue_1.listLogs)(logsMatch[1]) });
+        const logs = await (0, build_queue_1.listLogs)(logsMatch[1]);
+        json(res, { logs });
         return true;
     }
-    // GET /api/logs?path=...
+    // GET /api/logs?path=...&variantId=...
     if (urlPath.startsWith("/api/logs?") && method === "GET") {
         const q = new URL(urlPath, "http://localhost").searchParams;
         const logPath = q.get("path");
-        if (!logPath) {
-            json(res, { error: "缺少 path" }, 400);
+        const variantId = q.get("variantId");
+        if (!logPath || !variantId) {
+            json(res, { error: "缺少 path 或 variantId" }, 400);
             return true;
         }
-        const content = (0, build_queue_1.readLog)(logPath);
-        if (!content && !node_fs_1.default.existsSync(node_path_1.default.resolve(logPath))) {
+        const content = await (0, build_queue_1.readLog)(logPath, variantId);
+        if (!content) {
             json(res, { error: "日志不存在或路径非法" }, 403);
             return true;
         }
@@ -412,15 +568,45 @@ async function handleWorkspaceApi(req, res, urlPath, method) {
             json(res, { error: "模组不存在" }, 404);
             return true;
         }
-        const variants = m.variants.filter((v) => !body.loader || v.loader === body.loader);
-        for (const v of variants)
+        const { buildable, skipped } = pickBuildableVariants(m.variants, {
+            loader: body.loader,
+            failedOnly: body.failedOnly,
+        });
+        if (buildable.length === 0) {
+            const parts = [];
+            if (skipped.missing)
+                parts.push(`${skipped.missing} 个路径不存在`);
+            if (skipped.queued)
+                parts.push(`${skipped.queued} 个已在队列`);
+            if (skipped.filtered)
+                parts.push(`${skipped.filtered} 个不符合筛选`);
+            json(res, {
+                error: parts.length ? `没有可构建的变体（${parts.join("，")}）` : "没有可构建的变体",
+                skipped,
+            }, 400);
+            return true;
+        }
+        for (const v of buildable)
             store.updateVariantBuildStatus(v.id, "building");
-        const ids = (0, build_queue_1.enqueueBatch)(variants.map((v) => ({
+        const jobType = body.runClient ? "build+run" : "build";
+        const ids = (0, build_queue_1.enqueueBatch)(buildable.map((v) => ({
             variantId: v.id,
             projectPath: v.projectPath,
-            type: body.runClient ? "build+run" : "build",
+            type: jobType,
+            loader: v.loader,
+            mcVersion: v.mcVersion,
         })));
-        json(res, { jobIds: ids, count: ids.length, queue: (0, build_queue_1.getQueueStatus)() });
+        json(res, {
+            jobIds: ids,
+            count: ids.length,
+            skipped,
+            variants: buildable.map((v) => ({
+                id: v.id,
+                loader: v.loader,
+                mcVersion: v.mcVersion,
+            })),
+            queue: (0, build_queue_1.getQueueStatus)(),
+        });
         return true;
     }
     // GET /api/export/catalog
@@ -442,13 +628,194 @@ async function handleWorkspaceApi(req, res, urlPath, method) {
         json(res, { path: written, catalog: mod.exportCatalog() });
         return true;
     }
-    // GET /api/versions/:loader
+    // GET /api/versions/:loader — 从 ~/.dmcl/meta-cache.json 读取
     const verMatch = urlPath.match(/^\/api\/versions\/([^/]+)$/);
     if (verMatch && method === "GET") {
-        const { supportedVersions } = await Promise.resolve(`${node_path_1.default.join(node_path_1.default.resolve(__dirname, ".."), "dist", "meta", "versions.js")}`).then(s => __importStar(require(s)));
+        const { getMetaCache } = await (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("meta", "meta-cache.js"));
         const loader = verMatch[1];
-        const versions = await supportedVersions(loader);
-        json(res, { loader, versions });
+        if (!["fabric", "forge", "neoforge"].includes(loader)) {
+            json(res, { error: "未知加载器" }, 400);
+            return true;
+        }
+        const { data, fromCache, stale } = await getMetaCache().get();
+        json(res, { loader, versions: data.loaderVersions[loader] ?? [], fromCache, stale, updatedAt: data.updatedAt });
+        return true;
+    }
+    // GET /api/meta/status
+    if (urlPath === "/api/meta/status" && method === "GET") {
+        const { getMetaCache, META_CACHE_FILE } = await (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("meta", "meta-cache.js"));
+        json(res, { ...getMetaCache().getStatus(), cacheFile: META_CACHE_FILE });
+        return true;
+    }
+    // GET /api/verification/status
+    if (urlPath === "/api/verification/status" && method === "GET") {
+        const projectRoot = node_path_1.default.resolve(__dirname, "..");
+        const { readVersionVerificationIndex, summarizeVersionVerification, verificationFilePath, } = await (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("workspace", "version-verification.js"));
+        const index = readVersionVerificationIndex();
+        const records = Object.values(index.records);
+        const counts = { verified: 0, "build-only": 0, failed: 0, unknown: 0 };
+        for (const record of records) {
+            const summary = summarizeVersionVerification(record);
+            counts[summary.state]++;
+        }
+        records.sort((a, b) => (b.lastResultAt || "").localeCompare(a.lastResultAt || ""));
+        json(res, {
+            cacheFile: verificationFilePath(),
+            total: records.length,
+            counts,
+            recent: records.slice(0, 20),
+        });
+        return true;
+    }
+    // GET /api/verification/plan?loader=&mc=&limit=&force=1
+    if (urlPath.startsWith("/api/verification/plan") && method === "GET") {
+        const projectRoot = node_path_1.default.resolve(__dirname, "..");
+        const q = new URL(urlPath, "http://localhost").searchParams;
+        const loader = parseLoaderParam(q.get("loader"));
+        const mcVersion = q.get("mc") ?? undefined;
+        const limit = parseLimitParam(q.get("limit"));
+        const force = q.get("force") === "1" || q.get("force") === "true";
+        if (q.get("loader") && !loader) {
+            json(res, { error: "未知加载器" }, 400);
+            return true;
+        }
+        const { loadVersionVerificationPlan } = await (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("workspace", "version-verifier.js"));
+        const plan = await loadVersionVerificationPlan({ loader, mcVersion, force });
+        const shown = plan.slice(0, limit ?? 50);
+        json(res, { planned: plan.length, shown: shown.length, targets: shown });
+        return true;
+    }
+    // POST /api/verification/run or /api/verification/run-all
+    if ((urlPath === "/api/verification/run" || urlPath === "/api/verification/run-all") &&
+        method === "POST") {
+        const projectRoot = node_path_1.default.resolve(__dirname, "..");
+        const body = (await readBody(req));
+        const loader = parseLoaderParam(body.loader);
+        if (body.loader && !loader) {
+            json(res, { error: "未知加载器" }, 400);
+            return true;
+        }
+        const { runAllVersionVerifications, runVersionVerificationBatch } = await (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("workspace", "version-verifier.js"));
+        try {
+            const options = {
+                loader,
+                mcVersion: body.mcVersion,
+                limit: body.limit,
+                force: body.force === true,
+                rootDir: body.rootDir,
+                mirror: body.mirror !== false,
+                keepProjects: body.keepProjects === true,
+            };
+            const result = urlPath === "/api/verification/run-all"
+                ? await runAllVersionVerifications(options)
+                : await runVersionVerificationBatch(options);
+            json(res, result);
+        }
+        catch (err) {
+            json(res, { error: err.message }, 500);
+        }
+        return true;
+    }
+    // POST /api/meta/refresh — 手动刷新元数据缓存（同步等待完成）
+    if (urlPath === "/api/meta/refresh" && method === "POST") {
+        const { getMetaCache } = await (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("meta", "meta-cache.js"));
+        const { invalidateMatrixCache } = await (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("workspace", "matrix.js"));
+        try {
+            const data = await getMetaCache().refresh();
+            invalidateMatrixCache();
+            json(res, {
+                ok: true,
+                updatedAt: data.updatedAt,
+                loaderVersions: data.loaderVersions,
+            });
+        }
+        catch (err) {
+            json(res, { error: `刷新失败：${err.message}` }, 500);
+        }
+        return true;
+    }
+    // GET /api/mappings/status
+    if (urlPath === "/api/mappings/status" && method === "GET") {
+        const projectRoot = node_path_1.default.resolve(__dirname, "..");
+        const { getMappingsCache, MAPPINGS_CACHE_FILE } = await (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("meta", "mappings-cache.js"));
+        json(res, { ...getMappingsCache().getStatus(), cacheFile: MAPPINGS_CACHE_FILE });
+        return true;
+    }
+    // POST /api/mappings/refresh — 强制刷新单个 loader+mc 的映射缓存
+    if (urlPath === "/api/mappings/refresh" && method === "POST") {
+        const projectRoot = node_path_1.default.resolve(__dirname, "..");
+        const body = (await readBody(req));
+        const loader = body.loader;
+        const mcVersion = body.mcVersion;
+        if (!loader || !mcVersion || !["fabric", "forge", "neoforge"].includes(loader)) {
+            json(res, { error: "缺少 loader 或 mcVersion" }, 400);
+            return true;
+        }
+        const { getMappingsCache } = await (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("meta", "mappings-cache.js"));
+        try {
+            const entry = await getMappingsCache().refresh(loader, mcVersion);
+            json(res, {
+                loader,
+                mcVersion,
+                options: entry.options,
+                default: entry.default,
+                updatedAt: entry.updatedAt,
+                fromCache: false,
+            });
+        }
+        catch (err) {
+            json(res, { error: `刷新失败：${err.message}` }, 500);
+        }
+        return true;
+    }
+    // POST /api/mappings/refresh-all — 刷新某加载器全部版本的映射缓存
+    if (urlPath === "/api/mappings/refresh-all" && method === "POST") {
+        const projectRoot = node_path_1.default.resolve(__dirname, "..");
+        const body = (await readBody(req));
+        const loader = body.loader;
+        if (!loader || !["fabric", "forge", "neoforge"].includes(loader)) {
+            json(res, { error: "缺少 loader" }, 400);
+            return true;
+        }
+        const { getMetaCache } = await (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("meta", "meta-cache.js"));
+        const { getMappingsCache } = await (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("meta", "mappings-cache.js"));
+        const { data } = await getMetaCache().get();
+        const versions = data.loaderVersions[loader] ?? [];
+        const result = await getMappingsCache().prefetch({ [loader]: versions });
+        json(res, { ok: true, loader, versionCount: versions.length, ...result });
+        return true;
+    }
+    if (urlPath === "/api/mappings/warmup" && method === "POST") {
+        const projectRoot = node_path_1.default.resolve(__dirname, "..");
+        const body = (await readBody(req));
+        const { prefetchMappings } = await (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("meta", "mappings-cache.js"));
+        if (body.loader && body.mcVersion) {
+            prefetchMappings(body.loader, body.mcVersion).catch(() => { });
+        }
+        json(res, { ok: true });
+        return true;
+    }
+    // GET /api/mappings/:loader/:mc — 从持久化缓存读取真实可用映射
+    const mapMatch = urlPath.match(/^\/api\/mappings\/([^/]+)\/([^/]+)$/);
+    if (mapMatch && method === "GET") {
+        const projectRoot = node_path_1.default.resolve(__dirname, "..");
+        const loader = mapMatch[1];
+        const mcVersion = decodeURIComponent(mapMatch[2]);
+        if (!["fabric", "forge", "neoforge"].includes(loader)) {
+            json(res, { error: "未知加载器" }, 400);
+            return true;
+        }
+        const { getMappingsCache, MAPPINGS_CACHE_FILE } = await (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("meta", "mappings-cache.js"));
+        const { entry, fromCache } = await getMappingsCache().getOrFetch(loader, mcVersion);
+        json(res, {
+            loader,
+            mcVersion,
+            options: entry.options,
+            default: entry.default,
+            updatedAt: entry.updatedAt,
+            fromCache,
+            cacheFile: MAPPINGS_CACHE_FILE,
+        });
         return true;
     }
     // POST /api/open-cursor
@@ -472,4 +839,8 @@ async function initWorkspace(repoRoot) {
         store.addScanDir(projectsRoot);
     }
     mod.reconcileWorkspace(store);
+    const projectRoot = node_path_1.default.resolve(__dirname, "..");
+    (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("meta", "meta-cache.js"))
+        .then(({ getMetaCache }) => getMetaCache().refreshIfStale())
+        .catch((err) => console.warn("[dmcl] 元数据缓存初始化跳过:", err));
 }

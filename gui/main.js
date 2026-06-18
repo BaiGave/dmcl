@@ -42,26 +42,34 @@ const node_child_process_1 = require("node:child_process");
 const node_fs_1 = __importDefault(require("node:fs"));
 const node_path_1 = __importDefault(require("node:path"));
 const gradle_1 = require("./gradle");
+const gradle_runner_1 = require("./gradle-runner");
 const workspace_api_1 = require("./workspace-api");
 const build_queue_1 = require("./build-queue");
 const PORT = 19089;
 let mainWindow = null;
-let activeChild = null;
-let userCancelled = false;
-function killActiveChild() {
-    userCancelled = true;
-    if (activeChild && !activeChild.killed) {
-        try {
-            if (process.platform === "win32" && activeChild.pid) {
-                (0, node_child_process_1.spawn)("taskkill", ["/PID", String(activeChild.pid), "/T", "/F"], { stdio: "ignore" });
-            }
-            else {
-                activeChild.kill("SIGTERM");
-            }
-        }
-        catch { /* ignore */ }
+const generateSessions = new Set();
+let notificationBatch = { success: 0, failed: 0, labels: [], targetVariantId: null, failedVariantIds: [] };
+let notificationBatchCancelled = false;
+async function killChildProcess(proc) {
+    if (proc.killed)
+        return;
+    try {
+        await (0, gradle_1.killProcessTree)(proc, process.platform === "win32");
     }
-    activeChild = null;
+    catch { /* ignore */ }
+}
+function cancelAllGenerateSessions() {
+    for (const session of generateSessions) {
+        session.cancelled = true;
+        if (session.scaffoldChild)
+            void killChildProcess(session.scaffoldChild);
+        void session.runner.cancel();
+    }
+}
+function killActiveChild() {
+    cancelAllGenerateSessions();
+    void (0, gradle_runner_1.cancelAllRunners)();
+    (0, build_queue_1.cancelBuildQueue)();
 }
 function parseGenerateArgs(args) {
     const out = {};
@@ -84,11 +92,14 @@ async function registerGeneratedMod(args, success) {
         const store = mod.getWorkspace();
         let m = store.findModByModId(parsed.modid);
         if (!m) {
+            const modDir = mod.inferModDir(node_path_1.default.resolve(parsed.dir), parsed.modid);
             m = store.createMod({
                 modId: parsed.modid,
                 displayName: parsed.name ?? parsed.modid,
+                modDir,
             });
         }
+        store.refresh();
         const existing = store.findVariantByPath(parsed.dir);
         if (existing) {
             store.updateVariantBuildStatus(existing.variant.id, success ? "success" : "failed");
@@ -114,7 +125,70 @@ function broadcastBuildEvent(event) {
         mainWindow.webContents.send("build:event", event);
     }
 }
-(0, build_queue_1.onBuildEvent)((event) => broadcastBuildEvent(event));
+function resetNotificationBatch() {
+    notificationBatch = { success: 0, failed: 0, labels: [], targetVariantId: null, failedVariantIds: [] };
+    notificationBatchCancelled = false;
+}
+function completeBuildNotificationBatch(event) {
+    if (event.type === "queue" && notificationBatch.success + notificationBatch.failed === 0) {
+        notificationBatchCancelled = false;
+        return;
+    }
+    if (event.type === "cancelled") {
+        notificationBatchCancelled = true;
+        return;
+    }
+    if (event.type !== "done" || !event.job || notificationBatchCancelled)
+        return;
+    if (event.job.type === "run")
+        return;
+    if (event.success)
+        notificationBatch.success++;
+    else {
+        notificationBatch.failed++;
+        notificationBatch.failedVariantIds.push(event.job.variantId);
+    }
+    notificationBatch.targetVariantId = event.job.variantId;
+    const label = (0, build_queue_1.variantJobLabel)(event.job);
+    if (!notificationBatch.labels.includes(label))
+        notificationBatch.labels.push(label);
+    const queueStatus = (0, build_queue_1.getQueueStatus)();
+    if (queueStatus.pending > 0 || queueStatus.active > 0)
+        return;
+    const summary = { ...notificationBatch, labels: [...notificationBatch.labels], failedVariantIds: [...notificationBatch.failedVariantIds] };
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("build:summary", summary);
+    }
+    const shouldNotify = mainWindow && !mainWindow.isDestroyed()
+        && (!mainWindow.isFocused() || mainWindow.isMinimized())
+        && electron_1.Notification.isSupported();
+    if (shouldNotify) {
+        const hasFailure = summary.failed > 0;
+        const body = hasFailure
+            ? `${summary.success} 个成功，${summary.failed} 个失败`
+            : `${summary.success} 个变体构建成功${summary.labels.length ? ` · ${summary.labels.slice(0, 2).join(" / ")}` : ""}`;
+        const notification = new electron_1.Notification({
+            title: hasFailure ? "DMCL · 构建有失败" : "DMCL · 构建完成",
+            body,
+        });
+        notification.on("click", () => {
+            if (!mainWindow || mainWindow.isDestroyed())
+                return;
+            if (mainWindow.isMinimized())
+                mainWindow.restore();
+            mainWindow.show();
+            mainWindow.focus();
+            const targetVariantId = summary.failedVariantIds[0] || summary.targetVariantId;
+            mainWindow.webContents.send("notification:open", { targetVariantId, failed: hasFailure });
+        });
+        notification.show();
+    }
+    resetNotificationBatch();
+}
+(0, build_queue_1.onBuildEvent)((event) => {
+    broadcastBuildEvent(event);
+    completeBuildNotificationBatch(event);
+});
 function serveGui(req, res) {
     const rawUrl = req.url ?? "/";
     const urlObj = new URL(rawUrl, "http://localhost");
@@ -145,8 +219,11 @@ function serveGui(req, res) {
                     "X-Content-Type-Options": "nosniff",
                 });
                 let args;
+                let scaffoldOnly = false;
                 try {
-                    args = JSON.parse(body).args;
+                    const parsed = JSON.parse(body);
+                    args = parsed.args ?? [];
+                    scaffoldOnly = !!parsed.scaffoldOnly;
                 }
                 catch {
                     args = [];
@@ -162,6 +239,13 @@ function serveGui(req, res) {
                     return;
                 }
                 if (node_fs_1.default.existsSync(targetDir)) {
+                    const stat = node_fs_1.default.statSync(targetDir);
+                    if (!stat.isDirectory()) {
+                        res.write(`错误：路径已存在但不是目录：${targetDir}\n`);
+                        res.write("__EXIT__:1\n");
+                        res.end();
+                        return;
+                    }
                     const entries = node_fs_1.default.readdirSync(targetDir);
                     if (entries.length > 0) {
                         res.write(`错误：目录已存在且非空：${targetDir}\n`);
@@ -175,14 +259,18 @@ function serveGui(req, res) {
                 const nodeExe = process.execPath;
                 const tsxModule = node_path_1.default.join(projectRoot, "node_modules", "tsx", "dist", "cli.mjs");
                 const cliScript = node_path_1.default.join(projectRoot, "src", "index.ts");
-                userCancelled = false;
-                (0, gradle_1.setVerificationCancelled)(false);
+                const session = {
+                    cancelled: false,
+                    scaffoldChild: null,
+                    runner: (0, gradle_runner_1.createGradleRunner)(),
+                };
+                generateSessions.add(session);
                 const child = (0, node_child_process_1.spawn)(nodeExe, [tsxModule, cliScript, ...args], {
                     cwd: projectRoot,
                     env: { ...process.env, FORCE_COLOR: "0", ELECTRON_RUN_AS_NODE: "1" },
                     stdio: ["ignore", "pipe", "pipe"],
                 });
-                activeChild = child;
+                session.scaffoldChild = child;
                 const push = (data) => {
                     for (const line of data.toString("utf8").split("\n")) {
                         if (line.trim())
@@ -191,38 +279,45 @@ function serveGui(req, res) {
                 };
                 child.stdout.on("data", push);
                 child.stderr.on("data", push);
+                const finish = (exitCode) => {
+                    generateSessions.delete(session);
+                    session.runner.reset();
+                    res.write(`__EXIT__:${exitCode}\n`);
+                    res.end();
+                };
                 child.on("close", (code) => {
-                    activeChild = null;
-                    if (userCancelled) {
+                    session.scaffoldChild = null;
+                    if (session.cancelled) {
                         res.write("已取消\n");
-                        res.write("__EXIT__:1\n");
-                        res.end();
+                        finish(1);
                         return;
                     }
                     if (code !== 0) {
-                        res.write(`__EXIT__:${code ?? 1}\n`);
-                        res.end();
+                        registerGeneratedMod(args, false).then(() => finish(code ?? 1));
                         return;
                     }
-                    if (!targetDir) {
-                        res.write("跳过构建验证：无法确定项目目录\n");
-                        res.write("__EXIT__:0\n");
-                        res.end();
+                    if (scaffoldOnly || !targetDir) {
+                        registerGeneratedMod(args, true).then(() => {
+                            if (scaffoldOnly)
+                                res.write("✔ 项目已生成（跳过构建验证）\n");
+                            else
+                                res.write("跳过构建验证：无法确定项目目录\n");
+                            finish(0);
+                        });
                         return;
                     }
-                    runVerification(targetDir, res, args);
+                    void runVerificationWithRunner(session, targetDir, res, args, finish);
                 });
                 child.on("error", (err) => {
-                    activeChild = null;
+                    session.scaffoldChild = null;
+                    generateSessions.delete(session);
                     res.write(`ERROR: ${err.message}\n`);
-                    res.write("__EXIT__:1\n");
-                    res.end();
+                    finish(1);
                 });
             });
             return;
         }
         if (urlPath === "/api/cancel") {
-            (0, gradle_1.setVerificationCancelled)(true);
             killActiveChild();
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: true }));
@@ -310,24 +405,30 @@ function serveGui(req, res) {
         }
     });
 }
-function runVerification(targetDir, res, args) {
-    activeChild = (0, gradle_1.runBuild)(targetDir, res, (buildCode) => {
-        activeChild = null;
-        if (buildCode !== 0) {
-            registerGeneratedMod(args, false).then(() => {
-                res.write(`__EXIT__:${buildCode}\n`);
-                res.end();
-            });
-            return;
-        }
-        activeChild = (0, gradle_1.runClientVerify)(targetDir, res, (clientCode) => {
-            activeChild = null;
-            registerGeneratedMod(args, clientCode === 0).then(() => {
-                res.write(`__EXIT__:${clientCode}\n`);
-                res.end();
-            });
-        });
-    });
+async function runVerificationWithRunner(session, targetDir, res, args, finish) {
+    const log = (line) => {
+        if (!res.writableEnded)
+            res.write(line + "\n");
+    };
+    const sep = "─".repeat(40);
+    res.write(`${sep}\n`);
+    res.write("正在验证构建（首次需要下载 Minecraft 等依赖，约 5~20 分钟，请耐心等待）…\n");
+    const buildCode = await session.runner.runBuildOnly(targetDir, log);
+    if (session.cancelled) {
+        res.write("已取消\n");
+        await registerGeneratedMod(args, false);
+        finish(1);
+        return;
+    }
+    if (buildCode !== 0) {
+        await registerGeneratedMod(args, false);
+        finish(buildCode);
+        return;
+    }
+    res.write(`${sep}\n`);
+    const clientCode = await session.runner.runClientOnly(targetDir, log);
+    await registerGeneratedMod(args, clientCode === 0 && !session.cancelled);
+    finish(session.cancelled ? 1 : clientCode);
 }
 function createWindow() {
     mainWindow = new electron_1.BrowserWindow({
@@ -337,12 +438,16 @@ function createWindow() {
         minHeight: 600,
         resizable: true,
         title: "DMCL",
+        show: false,
+        backgroundColor: "#f6f8f6",
+        icon: node_path_1.default.join(__dirname, "assets", "brand", "dmcl-app-icon-256.png"),
         autoHideMenuBar: true,
         webPreferences: {
             preload: node_path_1.default.join(__dirname, "preload-bridge.js"),
         },
     });
     mainWindow.loadURL(`http://localhost:${PORT}`);
+    mainWindow.once("ready-to-show", () => mainWindow?.show());
     if (process.env.DMCL_DEBUG) {
         mainWindow.webContents.openDevTools();
     }
@@ -352,6 +457,8 @@ function createWindow() {
     });
 }
 electron_1.app.whenReady().then(() => {
+    if (process.platform === "win32")
+        electron_1.app.setAppUserModelId("com.dmcl.workbench");
     const repoRoot = node_path_1.default.resolve(__dirname, "..");
     (0, node_http_1.createServer)(serveGui).listen(PORT, "127.0.0.1", () => {
         console.log(`GUI server: http://localhost:${PORT}`);

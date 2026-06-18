@@ -8,16 +8,23 @@ export const LOADER_LABELS: Record<LoaderId, string> = {
 };
 
 export const MAPPINGS_LABELS: Record<MappingsId, string> = {
-  yarn: "Yarn（社区映射，默认）",
-  mojmap: "MojMap（官方映射）",
-  parchment: "Parchment（MojMap + 参数名）",
+  yarn: "Yarn（社区映射）",
+  mojmap: "官方默认映射",
+  parchment: "Parchment（参数名映射）",
 };
 
-/** 各加载器支持的映射表选项 */
+/** 用户可选映射（经联网探测；不含对每个版本硬编码的 MojMap） */
 export const MAPPINGS_FOR_LOADER: Record<LoaderId, MappingsId[]> = {
-  fabric: ["yarn", "mojmap", "parchment"],
-  forge: ["mojmap", "parchment"],
-  neoforge: ["mojmap", "parchment"],
+  fabric: ["yarn", "parchment"],
+  forge: ["parchment"],
+  neoforge: ["parchment"],
+};
+
+/** 生成项目时的回退默认（Forge/NeoForge 模板内置官方映射） */
+export const DEFAULT_MAPPINGS: Record<LoaderId, MappingsId> = {
+  fabric: "yarn",
+  forge: "mojmap",
+  neoforge: "mojmap",
 };
 
 export interface ProjectOptions {

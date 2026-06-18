@@ -1,15 +1,16 @@
 import { fetchJson } from "../core/http.js";
-
-let promosCache: Record<string, string> | null = null;
+import { getMetaCache } from "./meta-cache.js";
+import { META_ENDPOINTS } from "./sources.js";
 
 export async function fetchForgePromos(): Promise<Record<string, string>> {
-  if (!promosCache) {
-    const data = await fetchJson<{ promos: Record<string, string> }>(
-      "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json",
-    );
-    promosCache = data.promos;
-  }
-  return promosCache;
+  const { data } = await getMetaCache().get();
+  return data.forgePromos;
+}
+
+/** 强制从网络拉取 Forge promotions（仅供 meta-cache 刷新） */
+export async function fetchForgePromosRaw(): Promise<Record<string, string>> {
+  const data = await fetchJson<{ promos: Record<string, string> }>(META_ENDPOINTS.forgePromos);
+  return data.promos;
 }
 
 /** Forge 支持的 MC 版本集合（出现在 promotions 里的版本） */
@@ -25,6 +26,5 @@ export async function pickForgeVersion(mcVersion: string): Promise<string | null
 }
 
 export function forgeMdkUrl(mcVersion: string, forgeVersion: string): string {
-  const full = `${mcVersion}-${forgeVersion}`;
-  return `https://maven.minecraftforge.net/net/minecraftforge/forge/${full}/forge-${full}-mdk.zip`;
+  return META_ENDPOINTS.forgeMdkZip(mcVersion, forgeVersion);
 }

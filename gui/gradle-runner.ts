@@ -1,161 +1,166 @@
 import type { ChildProcess } from "node:child_process";
-import fs from "node:fs";
-import path from "node:path";
-import { gradleSpawn, killProcessTree } from "./gradle";
+import { getConcurrencyLimits, withClientSlot, withGradleBuildSlot } from "./concurrency-governor";
+import { getGradleCore, getProjectJdk } from "./gradle-core-bridge";
+import { killProcessTree } from "./gradle";
 
-let verificationCancelled = false;
-let currentProc: ChildProcess | null = null;
-let currentIsWin = false;
+export interface GradleRunner {
+  runBuildOnly(targetDir: string, log: (line: string) => void): Promise<number>;
+  runClientOnly(targetDir: string, log: (line: string) => void): Promise<number>;
+  runClientInteractive(targetDir: string, log: (line: string) => void): Promise<number>;
+  cancel(): Promise<void>;
+  reset(): void;
+  isCancelled(): boolean;
+}
 
-export function killCurrentRunner(): void {
-  verificationCancelled = true;
-  if (currentProc) {
-    killProcessTree(currentProc, currentIsWin);
-    currentProc = null;
+export function getBuildConcurrency(): number {
+  return getConcurrencyLimits().jobSlots;
+}
+
+export function getBuildConcurrencyInfo() {
+  return getConcurrencyLimits();
+}
+
+let runnerPool: GradleRunner[] | null = null;
+
+export function resetRunnerPool(): void {
+  const previous = runnerPool;
+  runnerPool = null;
+  if (previous) {
+    void Promise.all(previous.map((runner) => runner.cancel()));
   }
 }
 
-export function setRunnerCancelled(cancelled: boolean): void {
-  verificationCancelled = cancelled;
-}
-
-const CLIENT_SUCCESS = [
-  /Sound engine started/i,
-  /OpenGL Version/i,
-  /Created: \d+x\d+.*atlas/i,
-];
-const CLIENT_FAIL = [
-  /---- Minecraft Crash Report ----/,
-  /Process 'command 'runClient'' finished with non-zero/i,
-  /BUILD FAILED/i,
-];
-
-function streamProc(proc: ChildProcess, onLine: (line: string) => void): void {
-  const emit = (data: Buffer) => {
-    for (const line of data.toString("utf8").split("\n")) {
-      const trimmed = line.trim();
-      if (trimmed) onLine(trimmed);
+export function getRunnerPool(): GradleRunner[] {
+  const size = getBuildConcurrency();
+  if (!runnerPool || runnerPool.length !== size) {
+    if (runnerPool) {
+      void Promise.all(runnerPool.map((runner) => runner.cancel()));
     }
-  };
-  proc.stdout?.on("data", emit);
-  proc.stderr?.on("data", emit);
+    runnerPool = Array.from({ length: size }, () => createGradleRunner());
+  }
+  return runnerPool;
 }
 
-export function runBuildOnly(targetDir: string, log: (line: string) => void): Promise<number> {
-  const isWin = process.platform === "win32";
-  const gradlew = path.join(targetDir, isWin ? "gradlew.bat" : "gradlew");
-  if (!fs.existsSync(gradlew)) {
-    log("未找到 gradlew");
-    return Promise.resolve(1);
-  }
+export async function cancelAllRunners(): Promise<void> {
+  await Promise.all(getRunnerPool().map((runner) => runner.cancel()));
+}
 
-  log("正在构建（gradlew build）…");
-  const { proc } = gradleSpawn(targetDir, ["build", "--no-daemon"]);
-  currentProc = proc;
-  currentIsWin = process.platform === "win32";
-  streamProc(proc, log);
+export function resetAllRunners(): void {
+  for (const runner of getRunnerPool()) runner.reset();
+}
 
-  return new Promise((resolve) => {
-    proc.on("close", (code) => {
-      currentProc = null;
-      if (verificationCancelled) {
+export function createGradleRunner(): GradleRunner {
+  let cancelled = false;
+  let currentProc: ChildProcess | null = null;
+  let currentIsWin = false;
+
+  const trackProc = (proc: ChildProcess, isWin: boolean) => {
+    currentProc = proc;
+    currentIsWin = isWin;
+  };
+
+  const clearProc = (proc: ChildProcess | null) => {
+    if (currentProc === proc) currentProc = null;
+  };
+
+  const prepareProjectJdk = async (
+    targetDir: string,
+    log: (line: string) => void,
+  ): Promise<boolean> => {
+    if (cancelled) return false;
+    const jdk = await getProjectJdk();
+    return jdk.prepareProjectJdk(targetDir, log, { isCancelled: () => cancelled });
+  };
+
+  const runBuildOnly = async (targetDir: string, log: (line: string) => void): Promise<number> =>
+    withGradleBuildSlot(async () => {
+      const core = await getGradleCore();
+      if (!core.hasGradlew(targetDir)) {
+        log("未找到 gradlew，请确认项目目录有效");
+        return 1;
+      }
+      if (!(await prepareProjectJdk(targetDir, log)) || cancelled) {
         log("已取消");
-        resolve(1);
-        return;
+        return 1;
+      }
+
+      log(`正在构建（gradlew build，Gradle 并发 ${getConcurrencyLimits().gradleBuildConcurrency} 路 · 槽内单 Worker）…`);
+      let tracked: ChildProcess | null = null;
+      const code = await core.runGradleBuildTask(targetDir, log, {
+        tasks: ["build", "--no-daemon", "--max-workers=1"],
+        isCancelled: () => cancelled,
+        onProc: (proc, isWin) => { tracked = proc; trackProc(proc, isWin); },
+      });
+      clearProc(tracked);
+      if (cancelled) {
+        log("已取消");
+        return 1;
       }
       if (code === 0) log("✔ 构建成功");
       else log(`构建失败（退出码 ${code}）`);
-      resolve(code ?? 1);
+      return code;
     });
-    proc.on("error", (err) => {
-      log(`构建启动失败: ${err.message}`);
-      resolve(1);
+
+  const runClientInternal = async (
+    targetDir: string,
+    log: (line: string) => void,
+    mode: "verify" | "interactive",
+  ): Promise<number> =>
+    withClientSlot(async () => {
+      const core = await getGradleCore();
+      if (!core.hasGradlew(targetDir)) {
+        log("未找到 gradlew，请确认项目目录有效");
+        return 1;
+      }
+      if (!(await prepareProjectJdk(targetDir, log)) || cancelled) {
+        log("已取消");
+        return 1;
+      }
+
+      log(mode === "verify"
+        ? `正在启动 Minecraft 客户端（客户端验证并发 ${getConcurrencyLimits().clientConcurrency} 路）…`
+        : "正在启动 Minecraft 客户端（游戏窗口将保持打开，关闭游戏后结束）…");
+      let tracked: ChildProcess | null = null;
+      const code = await core.runGradleClientTask(targetDir, log, {
+        mode,
+        isCancelled: () => cancelled,
+        onProc: (proc, isWin) => { tracked = proc; trackProc(proc, isWin); },
+      });
+      clearProc(tracked);
+      if (cancelled) {
+        log("已取消");
+        return 1;
+      }
+      if (mode === "interactive") {
+        if (code === 0) log("✔ 客户端已正常退出");
+        else if (code === 1) log("⚠ 进程很快退出且未检测到游戏启动，请查看 Gradle 日志或先执行构建");
+        else log(`客户端异常退出（退出码 ${code}）`);
+      } else if (code === 0) {
+        log("✔ 客户端验证通过");
+      } else {
+        log("客户端验证失败");
+      }
+      return code;
     });
-  });
-}
 
-export function runClientOnly(targetDir: string, log: (line: string) => void): Promise<number> {
-  const isWin = process.platform === "win32";
-  const gradlew = path.join(targetDir, isWin ? "gradlew.bat" : "gradlew");
-  if (!fs.existsSync(gradlew)) {
-    log("未找到 gradlew");
-    return Promise.resolve(1);
-  }
-
-  log("正在启动 Minecraft 客户端…");
-  const { proc, isWin: win } = gradleSpawn(targetDir, ["runClient", "--no-daemon"]);
-  currentProc = proc;
-  currentIsWin = win;
-  const logPath = path.join(targetDir, "run", "logs", "latest.log");
-  const CLIENT_TIMEOUT_MS = 10 * 60 * 1000;
-
-  let finished = false;
-  let verified = false;
-
-  const finish = (code: number): number => {
-    if (finished) return code;
-    finished = true;
-    clearInterval(pollTimer);
-    clearTimeout(timeoutTimer);
-    if (pendingSuccessTimer) clearTimeout(pendingSuccessTimer);
-    currentProc = null;
-    killProcessTree(proc, win);
-    if (verificationCancelled) {
-      log("已取消");
-      return 1;
-    }
-    if (code === 0) log("✔ 客户端验证通过");
-    else log("客户端验证失败");
-    return code;
-  };
-
-  streamProc(proc, (line) => {
-    log(line);
-    if (CLIENT_FAIL.some((p) => p.test(line))) finish(1);
-  });
-
-  let pendingSuccessTimer: ReturnType<typeof setTimeout> | null = null;
-
-  const pollTimer = setInterval(() => {
-    if (finished || verified) return;
-    try {
-      if (!fs.existsSync(logPath)) return;
-      const content = fs.readFileSync(logPath, "utf8");
-      if (CLIENT_FAIL.some((p) => p.test(content))) {
-        log("检测到游戏崩溃");
-        finish(1);
-        return;
-      }
-      if (CLIENT_SUCCESS.some((p) => p.test(content))) {
-        verified = true;
-        log("✔ Minecraft 客户端已成功加载，正在关闭…");
-        pendingSuccessTimer = setTimeout(() => finish(0), 2500);
-      }
-    } catch { /* ignore */ }
-  }, 2000);
-
-  const timeoutTimer = setTimeout(() => {
-    if (!finished) {
-      log("客户端验证超时（10 分钟）");
-      finish(1);
-    }
-  }, CLIENT_TIMEOUT_MS);
-
-  return new Promise((resolve) => {
-    proc.on("close", (code) => {
-      if (finished) return;
-      if (verified) { resolve(finish(0)); return; }
+  return {
+    runBuildOnly,
+    runClientOnly: (targetDir, log) => runClientInternal(targetDir, log, "verify"),
+    runClientInteractive: (targetDir, log) => runClientInternal(targetDir, log, "interactive"),
+    isCancelled: () => cancelled,
+    reset: () => {
+      cancelled = false;
+    },
+    cancel: async () => {
+      if (cancelled) return;
+      cancelled = true;
+      const proc = currentProc;
+      if (!proc) return;
       try {
-        if (fs.existsSync(logPath) && CLIENT_SUCCESS.some((p) => p.test(fs.readFileSync(logPath, "utf8")))) {
-          resolve(finish(0));
-          return;
-        }
-      } catch { /* ignore */ }
-      resolve(finish(code === 0 ? 1 : (code ?? 1)));
-    });
-    proc.on("error", (err) => {
-      log(`客户端启动失败: ${err.message}`);
-      resolve(finish(1));
-    });
-  });
+        await killProcessTree(proc, currentIsWin);
+      } finally {
+        clearProc(proc);
+      }
+    },
+  };
 }

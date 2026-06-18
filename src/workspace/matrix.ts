@@ -1,33 +1,23 @@
 import type { LoaderId } from "../types.js";
 import { LOADER_LABELS } from "../types.js";
-import { allLoaderVersions } from "../meta/versions.js";
+import { getMetaCache } from "../meta/meta-cache.js";
 import type { ManagedMod, MatrixCell, MatrixCellStatus } from "./types.js";
+import {
+  getVersionVerificationSummary,
+  versionVerificationStamp,
+} from "./version-verification.js";
 
 const LOADERS: LoaderId[] = ["fabric", "neoforge", "forge"];
-
-function majorMinor(v: string): string {
-  const parts = v.split(".");
-  return parts.length >= 2 ? `${parts[0]}.${parts[1]}` : v;
-}
-
-/** 为模组详情页计算列版本：已有变体版本 + 同主次版本族 */
-function pickMatrixVersions(mod: ManagedMod, allVersions: string[]): string[] {
-  const existing = new Set(mod.variants.map((v) => v.mcVersion));
-  const families = new Set(mod.variants.map((v) => majorMinor(v.mcVersion)));
-
-  const picked = new Set<string>();
-  for (const v of existing) picked.add(v);
-
-  for (const v of allVersions) {
-    if (families.has(majorMinor(v))) picked.add(v);
+/** 矩阵列：各加载器支持版本的并集，按 Mojang 正式版发布时间从新到旧排序 */
+function pickMatrixVersions(
+  loaderVersions: Record<LoaderId, string[]>,
+  releaseOrder: string[],
+): string[] {
+  const supportedUnion = new Set<string>();
+  for (const loader of LOADERS) {
+    for (const v of loaderVersions[loader]) supportedUnion.add(v);
   }
-
-  if (picked.size === 0) {
-    return allVersions.slice(0, 8);
-  }
-
-  const order = new Map(allVersions.map((v, i) => [v, i]));
-  return [...picked].sort((a, b) => (order.get(a) ?? 999) - (order.get(b) ?? 999));
+  return releaseOrder.filter((v) => supportedUnion.has(v));
 }
 
 export interface MatrixResult {
@@ -37,33 +27,96 @@ export interface MatrixResult {
   supported: Record<LoaderId, Set<string>>;
 }
 
-export async function buildMatrix(mod: ManagedMod): Promise<MatrixResult> {
-  const loaderVersions = await allLoaderVersions();
-  const allMc = [...new Set(Object.values(loaderVersions).flat())];
-  const versions = pickMatrixVersions(mod, allMc);
+/** 将矩阵结果转为可 JSON 序列化的对象（Set → string[]） */
+export function serializeMatrixResult(result: MatrixResult): Omit<MatrixResult, "supported"> & {
+  supported: Record<LoaderId, string[]>;
+} {
+  return {
+    loaders: result.loaders,
+    versions: result.versions,
+    cells: result.cells,
+    supported: {
+      fabric: [...result.supported.fabric],
+      forge: [...result.supported.forge],
+      neoforge: [...result.supported.neoforge],
+    },
+  };
+}
 
+interface MatrixMeta {
+  releaseOrder: string[];
+  loaderVersions: Record<LoaderId, string[]>;
+  versions: string[];
+  supported: Record<LoaderId, Set<string>>;
+}
+
+let matrixMetaCache: { updatedAt: string; meta: MatrixMeta } | null = null;
+const modMatrixCache = new Map<string, { modUpdatedAt: string; result: MatrixResult }>();
+
+async function loadMatrixMeta(): Promise<MatrixMeta> {
+  const { data } = await getMetaCache().get();
+  if (matrixMetaCache && matrixMetaCache.updatedAt === data.updatedAt) {
+    return matrixMetaCache.meta;
+  }
+
+  const loaderVersions = data.loaderVersions;
+  const versions = pickMatrixVersions(loaderVersions, data.releaseVersions);
   const supported: Record<LoaderId, Set<string>> = {
     fabric: new Set(loaderVersions.fabric),
     forge: new Set(loaderVersions.forge),
     neoforge: new Set(loaderVersions.neoforge),
   };
+  const meta: MatrixMeta = {
+    releaseOrder: data.releaseVersions,
+    loaderVersions,
+    versions,
+    supported,
+  };
+  matrixMetaCache = { updatedAt: data.updatedAt, meta };
+  return meta;
+}
+export function invalidateMatrixCache(modId?: string): void {
+  if (modId) modMatrixCache.delete(modId);
+  else {
+    modMatrixCache.clear();
+    matrixMetaCache = null;
+  }
+}
+function modMatrixCacheKey(mod: ManagedMod): string {
+  const buildStates = mod.variants
+    .map((v) => `${v.id}:${v.buildStatus}`)
+    .sort()
+    .join("|");
+  return `${mod.updatedAt}\0${buildStates}\0${versionVerificationStamp()}`;
+}
 
+export async function buildMatrix(mod: ManagedMod): Promise<MatrixResult> {
+  const cacheKey = modMatrixCacheKey(mod);
+  const cached = modMatrixCache.get(mod.id);
+  if (cached && cached.modUpdatedAt === cacheKey) {
+    return cached.result;
+  }
+
+  const meta = await loadMatrixMeta();
   const cells: MatrixCell[] = [];
 
   for (const loader of LOADERS) {
-    for (const mcVersion of versions) {
+    for (const mcVersion of meta.versions) {
       const variant = mod.variants.find(
         (v) => v.loader === loader && v.mcVersion === mcVersion,
       );
 
       let status: MatrixCellStatus;
+      const verification = getVersionVerificationSummary(loader, mcVersion);
       if (variant) {
         if (variant.buildStatus === "building") status = "building";
         else if (variant.buildStatus === "success") status = "built";
         else if (variant.buildStatus === "failed") status = "failed";
         else status = "exists";
-      } else if (supported[loader].has(mcVersion)) {
-        status = "available";
+      } else if (meta.supported[loader].has(mcVersion)) {
+        if (verification.state === "verified") status = "verified";
+        else if (verification.state === "failed") status = "verification-failed";
+        else status = "available";
       } else {
         status = "unsupported";
       }
@@ -73,18 +126,18 @@ export async function buildMatrix(mod: ManagedMod): Promise<MatrixResult> {
         mcVersion,
         status,
         variantId: variant?.id,
+        verification,
       });
     }
   }
 
-  return {
+  const result: MatrixResult = {
     loaders: LOADERS.map((id) => ({ id, label: LOADER_LABELS[id] })),
-    versions,
+    versions: meta.versions,
     cells,
-    supported: {
-      fabric: supported.fabric,
-      forge: supported.forge,
-      neoforge: supported.neoforge,
-    },
+    supported: meta.supported,
   };
+
+  modMatrixCache.set(mod.id, { modUpdatedAt: cacheKey, result });
+  return result;
 }

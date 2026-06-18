@@ -32,11 +32,10 @@ export interface ManagedMod {
 }
 
 export interface WorkspaceData {
-  version: 1;
+  version: 2;
   scanDirs: string[];
-  /** 用户主动移除的路径，自动扫描时不再导入 */
+  /** 用户「仅移除登记」的路径，扫描时跳过 */
   excludedPaths: string[];
-  mods: ManagedMod[];
 }
 
 export type MatrixCellStatus =
@@ -44,6 +43,8 @@ export type MatrixCellStatus =
   | "failed"
   | "building"
   | "exists"
+  | "verified"
+  | "verification-failed"
   | "available"
   | "unsupported";
 
@@ -52,6 +53,13 @@ export interface MatrixCell {
   mcVersion: string;
   status: MatrixCellStatus;
   variantId?: string;
+  verification?: {
+    state: "verified" | "build-only" | "failed" | "unknown";
+    buildVerified: boolean;
+    clientVerified: boolean;
+    updatedAt?: string;
+    failureSummary?: string;
+  };
 }
 
 export interface BuildLogEntry {

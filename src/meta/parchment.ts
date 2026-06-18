@@ -1,12 +1,11 @@
 import { fetchText } from "../core/http.js";
-
-const PARCHMENT_MAVEN = "https://maven.parchmentmc.org";
+import { META_ENDPOINTS } from "./sources.js";
 
 /** 查询 Parchment 最新正式版，返回 null 表示该 MC 版本暂无 Parchment */
 export async function fetchParchmentVersion(mcVersion: string): Promise<string | null> {
   try {
     const xml = await fetchText(
-      `${PARCHMENT_MAVEN}/org/parchmentmc/data/parchment-${mcVersion}/maven-metadata.xml`,
+      META_ENDPOINTS.parchmentMetadata(mcVersion),
       { retries: 1, timeoutMs: 10_000 },
     );
     const m = xml.match(/<release>([^<]+)<\/release>/);

@@ -6,9 +6,12 @@ import { patchProperties } from "../core/fsutils.js";
 import { applyMappings } from "../core/mappings.js";
 import {
   fetchFabricApiVersion,
-  fetchFabricLoaderVersion,
+  fetchFabricLoaderForMc,
   fetchYarnVersion,
 } from "../meta/fabric.js";
+import { isUnobfuscatedMc } from "../meta/mc-version.js";
+import { META_ENDPOINTS } from "../meta/sources.js";
+import { adaptFabricToolchain } from "./fabric-toolchain.js";
 import type { Logger, ProjectOptions } from "../types.js";
 
 /** fabric-example-mod 按精确版本分支：优先 26.1.2 → 1.21.4 → 1.21 → master */
@@ -18,6 +21,7 @@ function branchCandidates(mcVersion: string): string[] {
   if (parts.length >= 3) {
     out.push(`${parts[0]}.${parts[1]}`);
   }
+  out.push("main");
   out.push("master");
   return out;
 }
@@ -25,14 +29,22 @@ function branchCandidates(mcVersion: string): string[] {
 export async function scaffoldFabric(opts: ProjectOptions, log: Logger): Promise<void> {
   let zipUrl: string | null = null;
   for (const branch of branchCandidates(opts.mcVersion)) {
-    const url = `https://codeload.github.com/FabricMC/fabric-example-mod/zip/refs/heads/${branch}`;
+    const url = META_ENDPOINTS.fabricExampleBranchZip(branch);
     if (await urlExists(url)) {
       log(`使用官方模板分支 ${branch}`);
       zipUrl = url;
       break;
     }
   }
-  if (!zipUrl) throw new Error("未找到可用的 Fabric 模板分支");
+  // If no codeload branch matches, fall back to GitHub archive of default branch
+  if (!zipUrl) {
+    const archiveUrl = META_ENDPOINTS.fabricExampleHeadZip;
+    if (await urlExists(archiveUrl)) {
+      log("未找到版本分支，使用 GitHub 默认归档模板");
+      zipUrl = archiveUrl;
+    }
+  }
+  if (!zipUrl) throw new Error("无法获取 Fabric 官方模板");
 
   log("下载模板…");
   await downloadAndExtract(zipUrl, opts.targetDir);
@@ -40,16 +52,20 @@ export async function scaffoldFabric(opts: ProjectOptions, log: Logger): Promise
   // 元数据查询失败不应中断生成：模板自带的版本号仍然可用
   log("查询 Fabric 各组件版本…");
   const [loaderVersion, apiVersion] = await Promise.all([
-    fetchFabricLoaderVersion().catch(() => null),
+    fetchFabricLoaderForMc(opts.mcVersion),
     fetchFabricApiVersion(opts.mcVersion),
   ]);
 
+  if (isUnobfuscatedMc(opts.mcVersion)) {
+    opts.mappings = "mojmap";
+  }
+
   let yarnVersion: string | null = null;
-  if (opts.mappings === "yarn") {
+  if (opts.mappings === "yarn" && !isUnobfuscatedMc(opts.mcVersion)) {
     yarnVersion = await fetchYarnVersion(opts.mcVersion).catch(() => null);
     if (!yarnVersion) {
       log("⚠ 此版本暂无 Yarn 映射，切换至 MojMap");
-      opts.mappings = "mojmap"; // 后续 applyMappings 会据此设置 mappings_variant
+      opts.mappings = "mojmap";
     }
   }
 
@@ -80,6 +96,8 @@ export async function scaffoldFabric(opts: ProjectOptions, log: Logger): Promise
 
   // 映射表配置（在 properties 补丁之后，以免 mappings_variant 被覆盖）
   await applyMappings(opts, log);
+
+  await adaptFabricToolchain(opts, log, { loaderVersion, apiVersion });
 
   // 模板自带的 LICENSE 是 CC0 模板文件，提醒用户自行决定
   const licenseFile = path.join(opts.targetDir, "LICENSE");

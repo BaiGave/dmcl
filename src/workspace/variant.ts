@@ -1,82 +1,19 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { LoaderId, Logger, MappingsId, ProjectOptions } from "../types.js";
-import { MAPPINGS_FOR_LOADER } from "../types.js";
-import { scaffoldFabric } from "../loaders/fabric.js";
-import { scaffoldForge } from "../loaders/forge.js";
-import { scaffoldNeoForge } from "../loaders/neoforge.js";
-import { applyChinaMirror } from "../core/mirror.js";
-import { injectBuildscriptMirrors, injectMavenMirrors } from "../core/maven.js";
-import { writeCursorConfig } from "../core/vscode.js";
+import { DEFAULT_MAPPINGS, MAPPINGS_FOR_LOADER } from "../types.js";
+import { scaffoldProject, pascalCase } from "../core/scaffold.js";
+import { ensureForgeMavenizerJdkCache } from "../core/forge-mavenizer.js";
 import {
-  detectJavaMajor,
-  downloadWithFallback,
-  extractJdk,
-  fetchJdkDownloadUrl,
-  findCachedJdk,
-  injectJdkHome,
-  jdkMirrorUrl,
-  requiredJavaFor,
+  ensureProjectJdk,
 } from "../core/jdk.js";
-import { spawnSync } from "node:child_process";
-import os from "node:os";
 import type { ManagedMod, ModVariant } from "./types.js";
 import { defaultVariantPath } from "./paths.js";
 import { getWorkspace } from "./store.js";
 
-function pascalCase(input: string): string {
-  const name = input
-    .split(/[^a-zA-Z0-9]+/)
-    .filter(Boolean)
-    .map((w) => w[0].toUpperCase() + w.slice(1))
-    .join("");
-  return /^[A-Za-z]/.test(name) ? name : `Mod${name}`;
-}
-
-async function scaffold(opts: ProjectOptions, log: Logger): Promise<void> {
-  await fs.promises.mkdir(opts.targetDir, { recursive: true });
-  if (opts.loader === "fabric") await scaffoldFabric(opts, log);
-  else if (opts.loader === "forge") await scaffoldForge(opts, log);
-  else await scaffoldNeoForge(opts, log);
-
-  if (opts.mirror) {
-    await applyChinaMirror(opts.targetDir, log);
-    await injectMavenMirrors(opts.targetDir, log);
-    await injectBuildscriptMirrors(opts.targetDir, log);
-  }
-  await writeCursorConfig(opts.targetDir);
-  const git = spawnSync("git", ["init", "-q"], { cwd: opts.targetDir });
-  if (git.status === 0) log("已初始化 git 仓库");
-}
-
 async function ensureJdk(mcVersion: string, targetDir: string, log: Logger): Promise<void> {
-  const java = requiredJavaFor(mcVersion);
-  const detected = detectJavaMajor();
-  if (detected !== null && detected >= java) return;
-
-  const cached = findCachedJdk(java);
-  if (cached) {
-    log(`使用缓存的 JDK ${java}`);
-    await injectJdkHome(targetDir, cached);
-    return;
-  }
-
-  log(`自动下载 JDK ${java}…`);
-  const asset = await fetchJdkDownloadUrl(java);
-  if (!asset) throw new Error(`查询 JDK ${java} 下载地址失败`);
-
-  const tmpDir = path.join(os.tmpdir(), `dmcl-jdk-${java}-${Date.now()}`);
-  const zipDest = path.join(tmpDir, asset.filename);
-  await fs.promises.mkdir(tmpDir, { recursive: true });
-  await downloadWithFallback(
-    [jdkMirrorUrl(java, asset.filename), asset.url],
-    zipDest,
-    asset.sizeBytes,
-    () => {},
-  );
-  const jdkPath = await extractJdk(zipDest, java);
-  await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
-  await injectJdkHome(targetDir, jdkPath);
+  await ensureProjectJdk(targetDir, mcVersion, log);
+  await ensureForgeMavenizerJdkCache(targetDir, log);
 }
 
 async function copyDir(src: string, dest: string): Promise<void> {
@@ -110,7 +47,7 @@ async function copySourceFromVariant(sourcePath: string, targetPath: string, log
 function pickMappings(loader: LoaderId, preferred?: MappingsId): MappingsId {
   const allowed = MAPPINGS_FOR_LOADER[loader];
   if (preferred && allowed.includes(preferred)) return preferred;
-  return allowed[0];
+  return DEFAULT_MAPPINGS[loader];
 }
 
 export interface GenerateVariantInput {
@@ -149,7 +86,7 @@ export async function generateVariant(
   };
 
   log(`正在生成 ${targetLoader} ${targetMc} 变体…`);
-  await scaffold(opts, log);
+  await scaffoldProject(opts, log);
   log("复制源码…");
   await copySourceFromVariant(sourceVariant.projectPath, targetDir, log);
   log("配置 JDK…");

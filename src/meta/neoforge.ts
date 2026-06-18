@@ -1,21 +1,17 @@
 import { fetchJson } from "../core/http.js";
-
-let versionsCache: string[] | null = null;
+import { GITHUB_DEFAULT_BRANCHES, META_ENDPOINTS } from "./sources.js";
+import { getMetaCache } from "./meta-cache.js";
 
 export async function fetchNeoForgeVersions(): Promise<string[]> {
-  if (!versionsCache) {
-    const data = await fetchJson<{ versions: string[] }>(
-      "https://maven.neoforged.net/api/maven/versions/releases/net/neoforged/neoforge",
-    );
-    versionsCache = data.versions;
-  }
-  return versionsCache;
+  const { data } = await getMetaCache().get();
+  return data.neoforgeVersions;
 }
 
-/**
- * MC 版本 → NeoForge 版本前缀：
- * 旧方案 1.21.4 → 21.4，1.21 → 21.0；新方案（26.x 起）版本号直接同名
- */
+export async function fetchNeoForgeVersionsRaw(): Promise<string[]> {
+  const data = await fetchJson<{ versions: string[] }>(META_ENDPOINTS.neoforgeVersions);
+  return data.versions;
+}
+
 export function neoPrefixFor(mcVersion: string): string {
   if (mcVersion.startsWith("1.")) {
     const rest = mcVersion.slice(2);
@@ -24,7 +20,6 @@ export function neoPrefixFor(mcVersion: string): string {
   return mcVersion;
 }
 
-/** 选取某 MC 版本对应的最新 NeoForge 版本（优先正式版） */
 export function pickNeoForgeVersion(versions: string[], mcVersion: string): string | null {
   const prefix = neoPrefixFor(mcVersion);
   const expectedSegments = prefix.split(".").length + 1;
@@ -37,15 +32,39 @@ export function pickNeoForgeVersion(versions: string[], mcVersion: string): stri
   return pool[pool.length - 1];
 }
 
-/** NeoForge 官方 MDK 模板仓库候选（按优先级） */
+function mdkBranchZips(repo: string): string[] {
+  return GITHUB_DEFAULT_BRANCHES.map((branch) =>
+    META_ENDPOINTS.neoforgeMdkBranchZip(repo, branch)
+  );
+}
+
+export function neoMdkTemplateFamily(mcVersion: string): "NeoGradle" | "ModDevGradle" {
+  const match = /^1\.20\.(\d+)$/.exec(mcVersion);
+  if (match && Number.parseInt(match[1], 10) <= 5) return "NeoGradle";
+  return "ModDevGradle";
+}
+
 export function neoMdkZipCandidates(mcVersion: string): string[] {
-  const repos = [`MDK-${mcVersion}-ModDevGradle`];
+  const family = neoMdkTemplateFamily(mcVersion);
+  const repos = [`MDK-${mcVersion}-${family}`];
   const parts = mcVersion.split(".");
-  if (parts.length === 3) {
+  if (parts.length === 3 && family === "ModDevGradle") {
     repos.push(`MDK-${parts[0]}.${parts[1]}-ModDevGradle`);
   }
-  return repos.flatMap((repo) => [
-    `https://codeload.github.com/NeoForgeMDKs/${repo}/zip/refs/heads/main`,
-    `https://codeload.github.com/NeoForgeMDKs/${repo}/zip/refs/heads/master`,
-  ]);
+  return repos.flatMap(mdkBranchZips);
+}
+
+export function neoMdkFallbackCandidates(mcVersion: string): string[] {
+  const parts = mcVersion.split(".");
+  if (parts.length < 3) return [];
+  const patch = Number.parseInt(parts[2], 10);
+  if (Number.isNaN(patch)) return [];
+  const minor = `${parts[0]}.${parts[1]}`;
+  const family = neoMdkTemplateFamily(mcVersion);
+  const nearbyPatches = family === "NeoGradle"
+    ? [patch - 1, patch + 1, patch - 2, patch + 2].filter((value) => value >= 0)
+    : [patch + 1, patch + 2];
+  return nearbyPatches.flatMap((p) =>
+    mdkBranchZips(`MDK-${minor}.${p}-${family}`)
+  );
 }

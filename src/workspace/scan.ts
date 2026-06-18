@@ -1,5 +1,6 @@
 import type { DetectedProject } from "./types.js";
 import { detectProject, scanDirectory } from "./detect.js";
+import { inferModDir } from "./project-meta.js";
 import { getWorkspace } from "./store.js";
 
 export interface ImportResult {
@@ -26,9 +27,11 @@ export function importDetectedProject(
   let mod = store.findModByModId(detected.modId);
   let isNew = false;
   if (!mod) {
+    const modDir = inferModDir(detected.projectPath, detected.modId);
     mod = store.createMod({
       modId: detected.modId,
       displayName: detected.displayName,
+      modDir,
     });
     isNew = true;
   }

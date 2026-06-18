@@ -1,70 +1,104 @@
 "use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.variantJobLabel = variantJobLabel;
+exports.setRunnerPoolForTests = setRunnerPoolForTests;
+exports.resetBuildQueueForTests = resetBuildQueueForTests;
 exports.onBuildEvent = onBuildEvent;
+exports.mergeBuildJobType = mergeBuildJobType;
+exports.isVariantQueued = isVariantQueued;
 exports.getQueueStatus = getQueueStatus;
 exports.cancelBuildQueue = cancelBuildQueue;
-exports.resetBuildQueueCancel = resetBuildQueueCancel;
 exports.enqueueBuild = enqueueBuild;
 exports.enqueueBatch = enqueueBatch;
 exports.listLogs = listLogs;
 exports.readLog = readLog;
 const node_fs_1 = __importDefault(require("node:fs"));
-const node_os_1 = __importDefault(require("node:os"));
 const node_path_1 = __importDefault(require("node:path"));
 const node_crypto_1 = require("node:crypto");
+const dist_loader_1 = require("./dist-loader");
+const gradle_runner_1 = require("./gradle-runner");
+const concurrency_governor_1 = require("./concurrency-governor");
+function variantLogsDir(projectPath) {
+    return node_path_1.default.join(node_path_1.default.resolve(projectPath), ".dmcl", "logs");
+}
+function isLoaderId(value) {
+    return value === "fabric" || value === "forge" || value === "neoforge";
+}
+function variantJobLabel(job) {
+    if (job.loader && job.mcVersion)
+        return `${job.loader} ${job.mcVersion}`;
+    return "变体";
+}
 let queue = [];
-let running = false;
-let currentJob = null;
+let activeJobs = new Map();
+let slotBusy = [];
+let processorPromise = null;
 let cancelled = false;
+/** 已被 cancelBuildQueue 收尾的任务，executeJob 不再重复 emit done */
+const cancelledJobIds = new Set();
 let listeners = [];
-function projectRoot() {
-    return node_path_1.default.resolve(__dirname, "..");
+let testRunnerPoolOverride = null;
+/** @internal 测试专用：注入 mock runner 池 */
+function setRunnerPoolForTests(pool) {
+    testRunnerPoolOverride = pool;
 }
-function logsBaseDir() {
-    return node_path_1.default.join(node_os_1.default.homedir(), ".dmcl", "logs");
+/** @internal 测试专用：重置队列模块状态 */
+function resetBuildQueueForTests() {
+    queue = [];
+    activeJobs.clear();
+    slotBusy = [];
+    processorPromise = null;
+    cancelled = false;
+    cancelledJobIds.clear();
+    listeners = [];
+    testRunnerPoolOverride = null;
 }
+function poolForProcessor() {
+    return testRunnerPoolOverride ?? (0, gradle_runner_1.getRunnerPool)();
+}
+function cancelProcessorRunners() {
+    const pool = poolForProcessor();
+    void Promise.all(pool.map((runner) => runner.cancel()));
+    pool.forEach((runner, index) => {
+        if (!slotBusy[index])
+            runner.reset();
+    });
+}
+const concurrencyInfo = () => (0, gradle_runner_1.getBuildConcurrencyInfo)();
 async function updateVariantStatus(variantId, status) {
     try {
-        const mod = await Promise.resolve(`${node_path_1.default.join(projectRoot(), "dist", "workspace", "store.js")}`).then(s => __importStar(require(s)));
+        const mod = await (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("workspace", "store.js"));
         mod.getWorkspace().updateVariantBuildStatus(variantId, status);
     }
     catch { /* ignore */ }
+}
+function summarizeFailure(lines) {
+    const hit = [...lines].reverse().find((line) => /BUILD FAILED|FAILURE|Exception|Error|Cannot|Could not/i.test(line));
+    return hit ? hit.slice(0, 240) : undefined;
+}
+async function recordBuildVerification(job, result) {
+    if (!isLoaderId(job.loader) || !job.mcVersion)
+        return;
+    try {
+        const workspace = await (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("workspace", "index.js"));
+        workspace.recordVersionVerification({
+            loader: job.loader,
+            mcVersion: job.mcVersion,
+            jobType: job.type,
+            variantId: job.variantId,
+            projectPath: job.projectPath,
+            buildSuccess: result.buildSuccess,
+            clientSuccess: result.clientSuccess,
+            failureSummary: result.failureSummary,
+        });
+        workspace.invalidateMatrixCache();
+    }
+    catch {
+        // Verification indexing must not break the build queue.
+    }
 }
 function onBuildEvent(cb) {
     listeners.push(cb);
@@ -76,37 +110,152 @@ function emit(event) {
     for (const cb of listeners)
         cb(event);
 }
+const JOB_TYPE_RANK = {
+    build: 1,
+    run: 2,
+    "build+run": 3,
+};
+/** 合并同一变体的构建意图：build+run ⊃ run ⊃ build */
+function mergeBuildJobType(existing, incoming) {
+    return JOB_TYPE_RANK[incoming] >= JOB_TYPE_RANK[existing] ? incoming : existing;
+}
+function findActiveJobByVariant(variantId) {
+    for (const job of activeJobs.values()) {
+        if (job.variantId === variantId)
+            return job;
+    }
+    return undefined;
+}
+function findQueuedJobByVariant(variantId) {
+    return queue.find((job) => job.variantId === variantId);
+}
+function applyJobFields(target, source) {
+    target.projectPath = source.projectPath;
+    target.loader = source.loader;
+    target.mcVersion = source.mcVersion;
+}
+function resumeQueueAfterEnqueue() {
+    cancelled = false;
+    if (activeJobs.size === 0) {
+        cancelledJobIds.clear();
+    }
+    ensureProcessor();
+}
+function activeJobList() {
+    return [...activeJobs.values()];
+}
+function isVariantQueued(variantId) {
+    const active = findActiveJobByVariant(variantId);
+    if (active && !cancelledJobIds.has(active.id))
+        return true;
+    return queue.some((j) => j.variantId === variantId);
+}
 function getQueueStatus() {
-    return { running, current: currentJob, pending: queue.length };
+    const active = activeJobs.size;
+    const pending = queue.length;
+    const total = active + pending;
+    const activeList = activeJobList();
+    const current = activeList[0] ?? null;
+    let currentLabel = null;
+    if (activeList.length === 1) {
+        currentLabel = variantJobLabel(activeList[0]);
+    }
+    else if (activeList.length > 1) {
+        currentLabel = `${activeList.length} 个变体`;
+    }
+    const governor = (0, concurrency_governor_1.getGovernorStatus)();
+    return {
+        running: processorPromise !== null || active > 0 || (pending > 0 && !cancelled),
+        current,
+        currentLabel,
+        pending,
+        active,
+        maxConcurrency: governor.gradleBuildMax,
+        gradleBuildActive: governor.gradleBuildActive,
+        gradleBuildMax: governor.gradleBuildMax,
+        clientActive: governor.clientActive,
+        clientMax: governor.clientMax,
+        jobSlots: governor.jobSlots,
+        physicalCores: concurrencyInfo().physicalCores,
+        logicalCores: concurrencyInfo().logicalCores,
+        total,
+        position: total > 0 ? total : null,
+    };
+}
+function finalizeCancelledJob(job) {
+    if (cancelledJobIds.has(job.id))
+        return;
+    cancelledJobIds.add(job.id);
+    emit({ type: "cancelled", job });
+    emit({ type: "done", job, success: false });
+    void updateVariantStatus(job.variantId, "failed");
 }
 function cancelBuildQueue() {
     cancelled = true;
+    const queuedVariantIds = queue.map((j) => j.variantId);
     queue.length = 0;
-    void Promise.resolve().then(() => __importStar(require("./gradle-runner"))).then((m) => m.killCurrentRunner());
-}
-function resetBuildQueueCancel() {
-    cancelled = false;
+    cancelProcessorRunners();
+    for (const job of activeJobs.values()) {
+        finalizeCancelledJob(job);
+    }
+    for (const variantId of queuedVariantIds) {
+        void updateVariantStatus(variantId, "unknown");
+    }
 }
 function enqueueBuild(job) {
-    resetBuildQueueCancel();
+    const activeJob = findActiveJobByVariant(job.variantId);
+    if (activeJob && !cancelledJobIds.has(activeJob.id)) {
+        const mergedType = mergeBuildJobType(activeJob.type, job.type);
+        if (mergedType !== activeJob.type) {
+            activeJob.type = mergedType;
+            applyJobFields(activeJob, job);
+        }
+        resumeQueueAfterEnqueue();
+        return activeJob.id;
+    }
+    const existing = findQueuedJobByVariant(job.variantId);
+    if (existing) {
+        const mergedType = mergeBuildJobType(existing.type, job.type);
+        if (mergedType !== existing.type) {
+            existing.type = mergedType;
+        }
+        applyJobFields(existing, job);
+        resumeQueueAfterEnqueue();
+        return existing.id;
+    }
     const entry = { ...job, id: (0, node_crypto_1.randomUUID)() };
     queue.push(entry);
     emit({ type: "queue", queueLength: queue.length });
-    void processQueue();
+    resumeQueueAfterEnqueue();
     return entry.id;
 }
 function enqueueBatch(jobs) {
     return jobs.map((j) => enqueueBuild(j));
 }
-function saveLog(variantId, lines) {
-    const dir = node_path_1.default.join(logsBaseDir(), variantId);
+function saveLog(projectPath, lines) {
+    if (lines.length === 0)
+        return null;
+    const dir = variantLogsDir(projectPath);
     node_fs_1.default.mkdirSync(dir, { recursive: true });
     const logPath = node_path_1.default.join(dir, `${Date.now()}-${(0, node_crypto_1.randomUUID)()}.log`);
     node_fs_1.default.writeFileSync(logPath, lines.join("\n"), "utf8");
     return logPath;
 }
-function listLogs(variantId) {
-    const dir = node_path_1.default.join(logsBaseDir(), variantId);
+async function resolveProjectPath(variantId) {
+    try {
+        const mod = await (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("workspace", "store.js"));
+        const found = mod.getWorkspace().getVariant(variantId);
+        return found?.variant.projectPath ?? null;
+    }
+    catch {
+        return null;
+    }
+}
+async function listLogs(variantId) {
+    const projectPath = await resolveProjectPath(variantId);
+    if (!projectPath)
+        return [];
+    const dir = variantLogsDir(projectPath);
     if (!node_fs_1.default.existsSync(dir))
         return [];
     return node_fs_1.default.readdirSync(dir)
@@ -117,59 +266,117 @@ function listLogs(variantId) {
     })
         .sort((a, b) => b.mtime - a.mtime);
 }
-function readLog(logPath) {
+function isPathUnderDir(resolved, dir) {
+    const base = node_path_1.default.resolve(dir);
+    const norm = (p) => (process.platform === "win32" ? p.toLowerCase() : p);
+    const r = norm(resolved);
+    const b = norm(base);
+    return r === b || r.startsWith(b + node_path_1.default.sep);
+}
+async function readLog(logPath, variantId) {
     const resolved = node_path_1.default.resolve(logPath);
-    const base = node_path_1.default.resolve(logsBaseDir());
-    if (!resolved.startsWith(base + node_path_1.default.sep))
+    const projectPath = await resolveProjectPath(variantId);
+    if (!projectPath)
+        return "";
+    const allowedDir = variantLogsDir(projectPath);
+    if (!isPathUnderDir(resolved, allowedDir))
         return "";
     if (!node_fs_1.default.existsSync(resolved))
         return "";
     return node_fs_1.default.readFileSync(resolved, "utf8");
 }
-async function processQueue() {
-    if (running)
-        return;
-    running = true;
-    while (queue.length > 0 && !cancelled) {
-        const job = queue.shift();
-        currentJob = job;
-        emit({ type: "start", job });
-        const lines = [];
-        const logLine = (line) => {
-            lines.push(line);
-            emit({ type: "progress", job, line });
-        };
-        let success = false;
-        try {
-            const { runBuildOnly, runClientOnly } = await Promise.resolve().then(() => __importStar(require("./gradle-runner")));
-            if (job.type === "build" || job.type === "build+run") {
-                const code = await runBuildOnly(job.projectPath, logLine);
-                if (code !== 0) {
-                    success = false;
-                }
-                else if (job.type === "build") {
-                    success = true;
-                }
-                else {
-                    const clientCode = await runClientOnly(job.projectPath, logLine);
-                    success = clientCode === 0;
-                }
+async function executeJob(job, runner) {
+    const lines = [];
+    const logLine = (line) => {
+        lines.push(line);
+        emit({ type: "progress", job, line });
+    };
+    let success = false;
+    let buildSuccess;
+    let clientSuccess;
+    try {
+        if (job.type === "build" || job.type === "build+run") {
+            const code = await runner.runBuildOnly(job.projectPath, logLine);
+            buildSuccess = code === 0;
+            if (code !== 0) {
+                success = false;
             }
-            else {
-                const code = await runClientOnly(job.projectPath, logLine);
-                success = code === 0;
+            else if (job.type === "build") {
+                success = true;
+            }
+            else if (!cancelled && !runner.isCancelled()) {
+                const clientCode = await runner.runClientOnly(job.projectPath, logLine);
+                clientSuccess = clientCode === 0;
+                success = clientSuccess;
             }
         }
-        catch (err) {
-            logLine(`错误：${err.message}`);
-            success = false;
+        else if (!cancelled && !runner.isCancelled()) {
+            const code = await runner.runClientInteractive(job.projectPath, logLine);
+            clientSuccess = code === 0;
+            success = clientSuccess;
         }
-        if (cancelled)
+    }
+    catch (err) {
+        logLine(`错误：${err.message}`);
+        success = false;
+    }
+    saveLog(job.projectPath, lines);
+    const alreadyFinalized = cancelledJobIds.has(job.id);
+    if (!alreadyFinalized) {
+        if (cancelled || runner.isCancelled())
             success = false;
-        saveLog(job.variantId, lines);
+        await recordBuildVerification(job, {
+            buildSuccess,
+            clientSuccess,
+            failureSummary: success ? undefined : summarizeFailure(lines),
+        });
         await updateVariantStatus(job.variantId, success ? "success" : "failed");
         emit({ type: "done", job, success });
-        currentJob = null;
     }
-    running = false;
+    runner.reset();
+}
+function ensureProcessor() {
+    if (processorPromise)
+        return;
+    processorPromise = runProcessor().finally(() => {
+        processorPromise = null;
+        if (queue.length > 0 && !cancelled) {
+            ensureProcessor();
+        }
+    });
+}
+async function runProcessor() {
+    const pool = poolForProcessor();
+    if (slotBusy.length !== pool.length) {
+        slotBusy = Array.from({ length: pool.length }, () => false);
+    }
+    const inFlight = new Map();
+    const startJobs = () => {
+        if (cancelled)
+            return;
+        for (let slot = 0; slot < pool.length; slot++) {
+            if (slotBusy[slot] || queue.length === 0)
+                continue;
+            const index = queue.findIndex((candidate) => !findActiveJobByVariant(candidate.variantId));
+            if (index < 0)
+                continue;
+            const job = queue.splice(index, 1)[0];
+            const runner = pool[slot];
+            slotBusy[slot] = true;
+            activeJobs.set(job.id, job);
+            emit({ type: "start", job });
+            const jobPromise = executeJob(job, runner).finally(() => {
+                slotBusy[slot] = false;
+                activeJobs.delete(job.id);
+                inFlight.delete(job.id);
+                startJobs();
+            });
+            inFlight.set(job.id, jobPromise);
+        }
+    };
+    startJobs();
+    while (inFlight.size > 0) {
+        await Promise.race(inFlight.values());
+        startJobs();
+    }
 }

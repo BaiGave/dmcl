@@ -1,7 +1,5 @@
-import fs from "node:fs";
 import path from "node:path";
 import type { WorkspaceStore } from "./store.js";
-import { defaultVariantPath } from "./paths.js";
 import { detectProject } from "./detect.js";
 
 export interface ReconcileResult {
@@ -10,43 +8,16 @@ export interface ReconcileResult {
   relocated: number;
 }
 
-function hasGradleProject(dir: string): boolean {
-  const gradlew = process.platform === "win32"
-    ? path.join(dir, "gradlew.bat")
-    : path.join(dir, "gradlew");
-  return fs.existsSync(gradlew);
-}
-
-/** 启动或刷新时校验变体路径是否仍在磁盘上，并尝试在默认位置找回 */
+/** 从磁盘重新扫描；文件夹已删除的模组会自动消失 */
 export function reconcileWorkspace(store: WorkspaceStore): ReconcileResult {
-  const result: ReconcileResult = { checked: 0, missing: 0, relocated: 0 };
-
-  for (const mod of store.getMods()) {
-    for (const variant of mod.variants) {
-      result.checked++;
-      const current = path.resolve(variant.projectPath);
-
-      if (hasGradleProject(current)) {
-        if (variant.pathMissing) {
-          store.setVariantPathMissing(variant.id, false);
-        }
-        continue;
-      }
-
-      const expected = defaultVariantPath(mod.modId, variant.loader, variant.mcVersion);
-      if (hasGradleProject(expected)) {
-        store.updateVariantPath(variant.id, expected);
-        store.setVariantPathMissing(variant.id, false);
-        result.relocated++;
-        continue;
-      }
-
-      store.setVariantPathMissing(variant.id, true);
-      result.missing++;
-    }
-  }
-
-  return result;
+  const before = store.getMods().length;
+  store.refresh();
+  const after = store.getMods().length;
+  return {
+    checked: before,
+    missing: Math.max(0, before - after),
+    relocated: 0,
+  };
 }
 
 /** 用户手动重新定位变体目录 */
@@ -65,7 +36,6 @@ export function relocateVariant(
   }
 
   store.updateVariantPath(variantId, resolved);
-  store.setVariantPathMissing(variantId, false);
   store.removeExcludedPath(resolved);
 
   if (detected.modVersion) {

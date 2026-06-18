@@ -68,15 +68,7 @@ function detectMappings(loader: LoaderId, props: Record<string, string>): Mappin
   return "mojmap";
 }
 
-function pascalCase(input: string): string {
-  const name = input
-    .split(/[^a-zA-Z0-9]+/)
-    .filter(Boolean)
-    .map((w) => w[0].toUpperCase() + w.slice(1))
-    .join("");
-  return /^[A-Za-z]/.test(name) ? name : `Mod${name}`;
-}
-
+import { pascalCase } from "../core/scaffold.js";
 /** 从磁盘上的 mod 项目目录解析元数据 */
 export function detectProject(projectPath: string): DetectedProject | null {
   const resolved = path.resolve(projectPath);

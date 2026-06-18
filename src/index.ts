@@ -2,156 +2,52 @@
 import * as p from "@clack/prompts";
 import pc from "picocolors";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { spawnSync } from "node:child_process";
-import { LOADER_LABELS, MAPPINGS_FOR_LOADER, MAPPINGS_LABELS, type LoaderId, type MappingsId, type ProjectOptions } from "./types.js";
-import { fetchReleaseVersions } from "./meta/mojang.js";
+import { LOADER_LABELS, MAPPINGS_LABELS, DEFAULT_MAPPINGS, type LoaderId, type MappingsId, type ProjectOptions } from "./types.js";
+import { resolveMappings } from "./meta/mappings-cache.js";
 import { supportedVersions } from "./meta/versions.js";
-import { scaffoldFabric } from "./loaders/fabric.js";
-import { scaffoldForge } from "./loaders/forge.js";
-import { scaffoldNeoForge } from "./loaders/neoforge.js";
 import { applyChinaMirror } from "./core/mirror.js";
-import { writeCursorConfig } from "./core/vscode.js";
+import { ensureForgeMavenizerJdkCache } from "./core/forge-mavenizer.js";
 import {
-  detectJavaMajor,
-  downloadWithFallback,
-  extractJdk,
-  fetchJdkDownloadUrl,
-  findCachedJdk,
-  injectJdkHome,
-  jdkMirrorUrl,
-  requiredJavaFor,
+  ensureProjectJdk,
+  pickJdkMajor,
+  readJavaHomeFromProject,
 } from "./core/jdk.js";
-import { injectBuildscriptMirrors, injectMavenMirrors } from "./core/maven.js";
+import { scaffoldProject, pascalCase } from "./core/scaffold.js";
 import { runGradleBuild, runGradleClientVerify } from "./core/build.js";
+import {
+  loadVersionVerificationPlan,
+  runAllVersionVerifications,
+  runVersionVerificationBatch,
+} from "./workspace/version-verifier.js";
 
 const MOD_ID_RE = /^[a-z][a-z0-9_]{1,63}$/;
 const GROUP_RE = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/;
 
-function pascalCase(input: string): string {
-  const name = input
-    .split(/[^a-zA-Z0-9]+/)
-    .filter(Boolean)
-    .map((w) => w[0].toUpperCase() + w.slice(1))
-    .join("");
-  return /^[A-Za-z]/.test(name) ? name : `Mod${name}`;
-}
-
-async function scaffold(opts: ProjectOptions, log: (msg: string) => void): Promise<void> {
-  await fs.promises.mkdir(opts.targetDir, { recursive: true });
-
-  if (opts.loader === "fabric") await scaffoldFabric(opts, log);
-  else if (opts.loader === "forge") await scaffoldForge(opts, log);
-  else await scaffoldNeoForge(opts, log);
-
-  if (opts.mirror) {
-    await applyChinaMirror(opts.targetDir, log);
-    await injectMavenMirrors(opts.targetDir, log);
-    await injectBuildscriptMirrors(opts.targetDir, log);
-  }
-
-  await writeCursorConfig(opts.targetDir);
-  log("已生成 Cursor / VS Code 配置（.vscode）");
-
-  const git = spawnSync("git", ["init", "-q"], { cwd: opts.targetDir });
-  if (git.status === 0) log("已初始化 git 仓库");
-}
-
-/** 交互式 JDK 处理：缓存命中直接注入，否则询问下载 */
+/** 交互式 JDK 处理：按 Gradle / MC 版本选择兼容 JDK */
 async function handleJdkInteractive(opts: ProjectOptions, log: (msg: string) => void): Promise<void> {
-  const java = requiredJavaFor(opts.mcVersion);
-  const detected = detectJavaMajor();
-  if (detected !== null && detected >= java) return; // 已满足
-
-  // 检查缓存
-  const cached = findCachedJdk(java);
-  if (cached) {
-    log(`使用缓存的 JDK ${java}（${cached}）`);
-    await injectJdkHome(opts.targetDir, cached);
-    return;
-  }
-
-  const label = detected === null ? "未检测到 Java" : `当前 Java ${detected} 不满足要求（需要 ≥ ${java}）`;
-  const shouldDownload = await p.confirm({
-    message: `${label}。是否自动下载安装 JDK ${java}？（约 200 MB）`,
-    initialValue: true,
-  });
-  if (p.isCancel(shouldDownload) || !shouldDownload) return;
-
-  await downloadAndInjectJdk(java, opts.targetDir, log);
+  await ensureProjectJdk(opts.targetDir, opts.mcVersion, log);
+  await ensureForgeMavenizerJdkCache(opts.targetDir, log);
 }
 
-/** 非交互模式 JDK 处理：有缓存直接用，没有就自动下载（GUI 场景不能问用户） */
+/** 非交互模式 JDK 处理（GUI 场景不能问用户） */
 async function handleJdkNonInteractive(opts: ProjectOptions, log: (msg: string) => void): Promise<void> {
-  const java = requiredJavaFor(opts.mcVersion);
-  const detected = detectJavaMajor();
-  if (detected !== null && detected >= java) return;
-
-  const cached = findCachedJdk(java);
-  if (cached) {
-    log(`使用缓存的 JDK ${java}（${cached}）`);
-    await injectJdkHome(opts.targetDir, cached);
-    return;
-  }
-
-  const label = detected === null ? "未检测到 Java" : `当前 Java ${detected} 过旧`;
-  log(`${label}，自动下载 JDK ${java}（约 200 MB，仅首次需要）…`);
-  await downloadAndInjectJdk(java, opts.targetDir, log);
-}
-
-async function downloadAndInjectJdk(javaMajor: number, targetDir: string, log: (msg: string) => void): Promise<void> {
-  const asset = await fetchJdkDownloadUrl(javaMajor);
-  if (!asset) {
-    throw new Error(`查询 JDK ${javaMajor} 下载地址失败，请手动安装：https://adoptium.net`);
-  }
-
-  const tmpDir = path.join(os.tmpdir(), `dmcl-jdk-${javaMajor}-${Date.now()}`);
-  const zipDest = path.join(tmpDir, asset.filename);
-  await fs.promises.mkdir(tmpDir, { recursive: true });
-
-  log(`下载 JDK ${javaMajor} ${asset.versionLabel}（${(asset.sizeBytes / 1024 / 1024).toFixed(0)} MB）…`);
-  let lastPct = -10;
-  // 优先清华镜像（国内快且稳），失败回退 Adoptium 官方源
-  const urls = [jdkMirrorUrl(javaMajor, asset.filename), asset.url];
-  await downloadWithFallback(urls, zipDest, asset.sizeBytes, (pct) => {
-    if (pct >= lastPct + 10 || (pct === 100 && lastPct !== 100)) {
-      lastPct = pct;
-      log(`下载 JDK ${pct}%`);
-    }
-  });
-
-  log("解压 JDK…");
-  const jdkPath = await extractJdk(zipDest, javaMajor);
-
-  // 清理临时文件
-  await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
-
-  log(`JDK 已安装至 ${jdkPath}`);
-  await injectJdkHome(targetDir, jdkPath);
-  log(`已配置 org.gradle.java.home`);
+  await ensureProjectJdk(opts.targetDir, opts.mcVersion, log);
+  await ensureForgeMavenizerJdkCache(opts.targetDir, log);
 }
 
 function printNextSteps(opts: ProjectOptions): void {
-  const java = requiredJavaFor(opts.mcVersion);
-  const detected = detectJavaMajor();
-  const cached = findCachedJdk(java);
-  const hasJdk = (detected !== null && detected >= java) || cached !== null;
+  const java = pickJdkMajor(opts.mcVersion, opts.targetDir);
+  const configured = readJavaHomeFromProject(opts.targetDir);
   const lines: string[] = [];
 
-  if (!hasJdk) {
-    if (detected === null) {
-      lines.push(pc.yellow(`⚠ 未检测到 Java。该版本需要 JDK ${java}，请先安装：`));
-      lines.push(pc.yellow(`  https://adoptium.net/zh-CN/temurin/releases/?version=${java}`));
-    } else {
-      lines.push(pc.yellow(`⚠ 当前 Java ${detected} 过旧，该版本需要 JDK ${java}：`));
-      lines.push(pc.yellow(`  https://adoptium.net/zh-CN/temurin/releases/?version=${java}`));
-    }
-  } else if (cached) {
-    lines.push(pc.green(`✔ 使用项目内置的 JDK ${java}（已配置 org.gradle.java.home）`));
+  if (configured) {
+    lines.push(pc.green(`✔ 已自动配置 JDK ${java}`));
+    lines.push(pc.dim(`  ${configured}`));
   } else {
-    lines.push(pc.green(`✔ Java ${detected} 满足要求（需要 ≥ ${java}）`));
+    lines.push(pc.green(`✔ 构建时将自动下载并配置 JDK ${java}（无需事先安装 Java）`));
   }
 
   lines.push("");
@@ -173,6 +69,13 @@ interface CliArgs {
   "no-mirror"?: boolean;
   mappings?: string;
   build?: boolean;
+  "verify-versions"?: boolean;
+  "verify-all"?: boolean;
+  "verify-plan"?: boolean;
+  "verify-limit"?: string;
+  "verify-root"?: string;
+  "verify-force"?: boolean;
+  "keep-projects"?: boolean;
   yes?: boolean;
 }
 
@@ -188,6 +91,13 @@ function parseCli(): CliArgs {
       "no-mirror": { type: "boolean" },
       mappings: { type: "string" },
       build: { type: "boolean" },
+      "verify-versions": { type: "boolean" },
+      "verify-all": { type: "boolean" },
+      "verify-plan": { type: "boolean" },
+      "verify-limit": { type: "string" },
+      "verify-root": { type: "string" },
+      "verify-force": { type: "boolean" },
+      "keep-projects": { type: "boolean" },
       yes: { type: "boolean", short: "y" },
     },
     allowPositionals: false,
@@ -200,8 +110,59 @@ function bail(message: string): never {
   process.exit(1);
 }
 
+function parseLoader(raw: string | undefined): LoaderId | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === "fabric" || raw === "forge" || raw === "neoforge") return raw;
+  bail(`鏈煡鍔犺浇鍣細${raw}`);
+}
+
+function parseLimit(raw: string | undefined): number | undefined {
+  if (!raw) return undefined;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0) bail(`verify-limit 闇€涓洪潪璐熸暣鏁帮細${raw}`);
+  return n;
+}
+
+async function handleVersionVerification(args: CliArgs): Promise<void> {
+  const loader = parseLoader(args.loader);
+  const limit = parseLimit(args["verify-limit"]);
+  const opts = {
+    loader,
+    mcVersion: args.mc,
+    force: args["verify-force"] === true,
+  };
+
+  if (args["verify-plan"] && !args["verify-versions"]) {
+    const plan = await loadVersionVerificationPlan(opts);
+    const shown = plan.slice(0, limit ?? 30);
+    console.log(JSON.stringify({
+      planned: plan.length,
+      shown: shown.length,
+      targets: shown,
+    }, null, 2));
+    return;
+  }
+
+  const runOptions = {
+    ...opts,
+    limit,
+    rootDir: args["verify-root"],
+    mirror: !args["no-mirror"],
+    keepProjects: args["keep-projects"] === true,
+  };
+  const result = args["verify-all"]
+    ? await runAllVersionVerifications(runOptions, (msg) => console.log(msg))
+    : await runVersionVerificationBatch(runOptions, (msg) => console.log(msg));
+  console.log(JSON.stringify(result, null, 2));
+}
+
 async function main(): Promise<void> {
   const args = parseCli();
+
+  if (args["verify-plan"] || args["verify-versions"] || args["verify-all"]) {
+    await handleVersionVerification(args);
+    return;
+  }
 
   // ---------- 非交互模式 ----------
   if (args.yes) {
@@ -213,7 +174,7 @@ async function main(): Promise<void> {
     const modId = args.modid;
     if (!MOD_ID_RE.test(modId)) bail("modid 需为全小写字母/数字/下划线，且以字母开头");
     const displayName = args.name ?? pascalCase(modId);
-    const mappingsRaw = args.mappings ?? (loader === "fabric" ? "yarn" : "mojmap");
+    const mappingsRaw = args.mappings ?? DEFAULT_MAPPINGS[loader];
     if (!["yarn", "mojmap", "parchment"].includes(mappingsRaw)) bail(`未知映射表：${mappingsRaw}`);
     const opts: ProjectOptions = {
       loader,
@@ -229,7 +190,7 @@ async function main(): Promise<void> {
     // GUI/管道场景下 spinner 输出不可靠，直接逐行打印
     const log = (msg: string) => console.log(msg);
     log("正在生成项目…");
-    await scaffold(opts, log);
+    await scaffoldProject(opts, log);
     log("检查 JDK…");
     try {
       await handleJdkNonInteractive(opts, log);
@@ -265,8 +226,7 @@ async function main(): Promise<void> {
   s1.start(`正在获取 ${LOADER_LABELS[loader]} 支持的 Minecraft 版本`);
   let versions: string[];
   try {
-    const releases = await fetchReleaseVersions();
-    versions = await supportedVersions(loader, releases);
+    versions = await supportedVersions(loader);
   } catch (err) {
     s1.stop("获取版本列表失败");
     bail(`网络请求失败，请检查网络后重试：${(err as Error).message}`);
@@ -285,15 +245,17 @@ async function main(): Promise<void> {
   })) as string;
   if (p.isCancel(mcVersion)) bail("已取消");
 
-  const mappingsOptions = MAPPINGS_FOR_LOADER[loader].map((m) => ({
-    value: m,
-    label: MAPPINGS_LABELS[m],
+  const mappingsOptions = (await resolveMappings(loader, mcVersion)).options.map((o) => ({
+    value: o.id,
+    label: o.version ? `${o.label} (${o.version})` : o.label,
   }));
   const mappings = (mappingsOptions.length === 1)
-    ? mappingsOptions[0].value
+    ? mappingsOptions[0].value as MappingsId
     : (await p.select({
         message: "选择映射表（Mappings）",
-        options: mappingsOptions,
+        options: mappingsOptions.length
+          ? mappingsOptions
+          : [{ value: DEFAULT_MAPPINGS[loader], label: MAPPINGS_LABELS[DEFAULT_MAPPINGS[loader]] }],
       })) as MappingsId;
   if (p.isCancel(mappings)) bail("已取消");
 
@@ -356,7 +318,7 @@ async function main(): Promise<void> {
   const s2 = p.spinner();
   s2.start("正在生成项目");
   try {
-    await scaffold(opts, (msg) => s2.message(msg));
+    await scaffoldProject(opts, (msg) => s2.message(msg));
     s2.message("检查 JDK…");
     await handleJdkInteractive(opts, (msg) => s2.message(msg));
   } catch (err) {

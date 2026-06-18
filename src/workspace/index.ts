@@ -11,7 +11,7 @@ export {
   variantDirName,
 } from "./paths.js";
 export { detectProject, scanDirectory, scanDefaultProjects } from "./detect.js";
-export { buildMatrix } from "./matrix.js";
+export { buildMatrix, invalidateMatrixCache, serializeMatrixResult } from "./matrix.js";
 export { generateVariant } from "./variant.js";
 export {
   importDetectedProject,
@@ -25,3 +25,43 @@ export { listRegisteredProjects } from "./registry.js";
 export type { ExternalProjectEntry } from "./registry.js";
 export { assertValidModId, isValidModId } from "./validate.js";
 export { exportCatalog, writeCatalogExport } from "./export.js";
+export { deleteVariantProject, deleteModProjects } from "./delete.js";
+export {
+  inferModDir,
+  variantLogsDir,
+  readModMeta,
+  writeModMeta,
+  MOD_META_FILE,
+  VARIANT_META_DIR,
+} from "./project-meta.js";
+export { syncWorkspaceFromDisk } from "./sync-from-disk.js";
+export {
+  getVersionVerificationSummary,
+  readVersionVerificationIndex,
+  recordVersionVerification,
+  verificationFilePath,
+  verificationKey,
+  versionVerificationStamp,
+  writeVersionVerificationIndex,
+} from "./version-verification.js";
+export type {
+  RecordVerificationInput,
+  VersionVerificationFile,
+  VersionVerificationRecord,
+  VersionVerificationSummary,
+  VerificationState,
+} from "./version-verification.js";
+export {
+  buildVersionVerificationPlan,
+  loadVersionVerificationPlan,
+  runAllVersionVerifications,
+  runVersionVerificationBatch,
+  verifyOneVersion,
+} from "./version-verifier.js";
+export type {
+  VersionVerificationBatchResult,
+  VersionVerificationPlanOptions,
+  VersionVerificationRunOptions,
+  VersionVerificationRunResult,
+  VersionVerificationTarget,
+} from "./version-verifier.js";
