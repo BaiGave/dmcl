@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { LoaderId, MappingsId } from "../types.js";
 import { fetchYarnVersion } from "./fabric.js";
-import { isUnobfuscatedMc } from "./mc-version.js";
+import { isUnobfuscatedMc, usesLegacyForgeMcp } from "./mc-version.js";
 import { fetchParchmentVersion } from "./parchment.js";
 import { MAPPINGS_FRESH_TTL_MS } from "./sources.js";
 
@@ -52,6 +52,21 @@ function implicitMojmapOption(label: string): MappingOption {
 
 export async function resolveMappings(loader: LoaderId, mcVersion: string): Promise<MappingCacheEntry> {
   const options: MappingOption[] = [];
+
+  if (loader === "forge" && usesLegacyForgeMcp(mcVersion)) {
+    return {
+      loader,
+      mcVersion,
+      options: [{
+        id: "mcp",
+        label: "MCP（由 Forge MDK 选择 snapshot/stable）",
+        available: true,
+        implicit: true,
+      }],
+      default: "mcp",
+      updatedAt: new Date().toISOString(),
+    };
+  }
 
   if (loader === "fabric" && isUnobfuscatedMc(mcVersion)) {
     return {
@@ -136,6 +151,14 @@ export class MappingsCache {
 
   /** 缓存条目无有效探测结果时需重新拉取 */
   isIncomplete(entry: MappingCacheEntry): boolean {
+    if (entry.loader === "forge") {
+      const legacyMcp = usesLegacyForgeMcp(entry.mcVersion);
+      if (legacyMcp) {
+        return entry.default !== "mcp"
+          || !entry.options.some((option) => option.id === "mcp" && option.available);
+      }
+      if (entry.default === "mcp" || entry.options.some((option) => option.id === "mcp")) return true;
+    }
     if (entry.loader === "fabric") {
       if (isUnobfuscatedMc(entry.mcVersion)) return false;
       return entry.options.length === 0;

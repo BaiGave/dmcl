@@ -2,12 +2,8 @@ import type { LoaderId } from "../types.js";
 import { LOADER_LABELS } from "../types.js";
 import { getMetaCache } from "../meta/meta-cache.js";
 import type { ManagedMod, MatrixCell, MatrixCellStatus } from "./types.js";
-import {
-  getVersionVerificationSummary,
-  versionVerificationStamp,
-} from "./version-verification.js";
 
-const LOADERS: LoaderId[] = ["fabric", "neoforge", "forge"];
+const LOADERS: LoaderId[] = ["fabric", "forge", "neoforge"];
 /** 矩阵列：各加载器支持版本的并集，按 Mojang 正式版发布时间从新到旧排序 */
 function pickMatrixVersions(
   loaderVersions: Record<LoaderId, string[]>,
@@ -54,7 +50,7 @@ let matrixMetaCache: { updatedAt: string; meta: MatrixMeta } | null = null;
 const modMatrixCache = new Map<string, { modUpdatedAt: string; result: MatrixResult }>();
 
 async function loadMatrixMeta(): Promise<MatrixMeta> {
-  const { data } = await getMetaCache().get();
+  const { data } = await getMetaCache().get({ strategy: "cache-first" });
   if (matrixMetaCache && matrixMetaCache.updatedAt === data.updatedAt) {
     return matrixMetaCache.meta;
   }
@@ -87,7 +83,7 @@ function modMatrixCacheKey(mod: ManagedMod): string {
     .map((v) => `${v.id}:${v.buildStatus}`)
     .sort()
     .join("|");
-  return `${mod.updatedAt}\0${buildStates}\0${versionVerificationStamp()}`;
+  return `${mod.updatedAt}\0${buildStates}`;
 }
 
 export async function buildMatrix(mod: ManagedMod): Promise<MatrixResult> {
@@ -107,16 +103,13 @@ export async function buildMatrix(mod: ManagedMod): Promise<MatrixResult> {
       );
 
       let status: MatrixCellStatus;
-      const verification = getVersionVerificationSummary(loader, mcVersion);
       if (variant) {
         if (variant.buildStatus === "building") status = "building";
         else if (variant.buildStatus === "success") status = "built";
         else if (variant.buildStatus === "failed") status = "failed";
         else status = "exists";
       } else if (meta.supported[loader].has(mcVersion)) {
-        if (verification.state === "verified") status = "verified";
-        else if (verification.state === "failed") status = "verification-failed";
-        else status = "available";
+        status = "available";
       } else {
         status = "unsupported";
       }
@@ -126,7 +119,6 @@ export async function buildMatrix(mod: ManagedMod): Promise<MatrixResult> {
         mcVersion,
         status,
         variantId: variant?.id,
-        verification,
       });
     }
   }

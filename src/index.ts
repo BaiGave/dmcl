@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { spawnSync } from "node:child_process";
-import { LOADER_LABELS, MAPPINGS_LABELS, DEFAULT_MAPPINGS, type LoaderId, type MappingsId, type ProjectOptions } from "./types.js";
+import { LOADER_LABELS, MAPPINGS_LABELS, DEFAULT_MAPPINGS, SIDE_LAYOUT_HINTS, SIDE_LAYOUT_LABELS, type LoaderId, type MappingsId, type ProjectOptions, type SideLayoutId } from "./types.js";
 import { resolveMappings } from "./meta/mappings-cache.js";
 import { supportedVersions } from "./meta/versions.js";
 import { applyChinaMirror } from "./core/mirror.js";
@@ -16,6 +16,7 @@ import {
   readJavaHomeFromProject,
 } from "./core/jdk.js";
 import { scaffoldProject, pascalCase } from "./core/scaffold.js";
+import { defaultSideLayout, parseSideLayout } from "./core/side-layout.js";
 import { runGradleBuild, runGradleClientVerify } from "./core/build.js";
 import {
   loadVersionVerificationPlan,
@@ -68,6 +69,7 @@ interface CliArgs {
   dir?: string;
   "no-mirror"?: boolean;
   mappings?: string;
+  "side-layout"?: string;
   build?: boolean;
   "verify-versions"?: boolean;
   "verify-all"?: boolean;
@@ -90,6 +92,7 @@ function parseCli(): CliArgs {
       dir: { type: "string" },
       "no-mirror": { type: "boolean" },
       mappings: { type: "string" },
+      "side-layout": { type: "string" },
       build: { type: "boolean" },
       "verify-versions": { type: "boolean" },
       "verify-all": { type: "boolean" },
@@ -175,7 +178,9 @@ async function main(): Promise<void> {
     if (!MOD_ID_RE.test(modId)) bail("modid 需为全小写字母/数字/下划线，且以字母开头");
     const displayName = args.name ?? pascalCase(modId);
     const mappingsRaw = args.mappings ?? DEFAULT_MAPPINGS[loader];
-    if (!["yarn", "mojmap", "parchment"].includes(mappingsRaw)) bail(`未知映射表：${mappingsRaw}`);
+    if (!["yarn", "mojmap", "parchment", "mcp"].includes(mappingsRaw)) bail(`未知映射表：${mappingsRaw}`);
+    const sideLayoutRaw = parseSideLayout(args["side-layout"] ?? undefined);
+    if (args["side-layout"] && !sideLayoutRaw) bail(`未知运行端布局：${args["side-layout"]}（可选 unified / split / client / server）`);
     const opts: ProjectOptions = {
       loader,
       mcVersion: args.mc,
@@ -186,6 +191,7 @@ async function main(): Promise<void> {
       targetDir: path.resolve(args.dir ?? modId),
       mirror: !args["no-mirror"],
       mappings: mappingsRaw as MappingsId,
+      sideLayout: sideLayoutRaw ?? defaultSideLayout(loader, args.mc),
     };
     // GUI/管道场景下 spinner 输出不可靠，直接逐行打印
     const log = (msg: string) => console.log(msg);
@@ -259,6 +265,18 @@ async function main(): Promise<void> {
       })) as MappingsId;
   if (p.isCancel(mappings)) bail("已取消");
 
+  const sideLayoutDefault = defaultSideLayout(loader, mcVersion);
+  const sideLayout = (await p.select({
+    message: "选择运行端与源码结构",
+    options: (["unified", "split", "client", "server"] as SideLayoutId[]).map((id) => ({
+      value: id,
+      label: SIDE_LAYOUT_LABELS[id],
+      hint: SIDE_LAYOUT_HINTS[id],
+    })),
+    initialValue: sideLayoutDefault,
+  })) as SideLayoutId;
+  if (p.isCancel(sideLayout)) bail("已取消");
+
   const modId = (await p.text({
     message: "模组 ID（全小写，用于注册名/资源目录）",
     placeholder: "mymod",
@@ -313,6 +331,7 @@ async function main(): Promise<void> {
     targetDir,
     mirror,
     mappings,
+    sideLayout,
   };
 
   const s2 = p.spinner();

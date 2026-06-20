@@ -4,8 +4,9 @@ import { patchProperties, walkFiles } from "../core/fsutils.js";
 import { requiredJavaFor } from "../core/jdk.js";
 import { pascalCase } from "../core/scaffold.js";
 import { fetchFabricApiVersion } from "../meta/fabric.js";
-import { isLegacy1xMc, isUnobfuscatedMc, mcFeatureNumber } from "../meta/mc-version.js";
+import { isLegacy1xMc, isUnobfuscatedMc, mcFeatureNumber, supportsSplitSources } from "../meta/mc-version.js";
 import { detectProject } from "../workspace/detect.js";
+import { wantsSplitSources } from "../core/side-layout.js";
 import type { Logger, ProjectOptions } from "../types.js";
 
 /**
@@ -19,9 +20,7 @@ export function usesLegacyFabricApi(mcVersion: string): boolean {
 }
 
 /** MC 1.18+ / 26+ 支持 splitEnvironmentSourceSets */
-export function supportsSplitSources(mcVersion: string): boolean {
-  return mcFeatureNumber(mcVersion) >= 18;
-}
+export { supportsSplitSources } from "../meta/mc-version.js";
 
 /** MC 26+ 非混淆，使用 fabric-loom；更早版本使用 fabric-loom-remap */
 export function usesRemapLoom(mcVersion: string): boolean {
@@ -134,7 +133,7 @@ export function patchBuildGradle(content: string, opts: ProjectOptions): string 
   const javaMajor = requiredJavaFor(opts.mcVersion);
   const javaEnum = modJavaVersionEnum(javaMajor);
   const remap = usesRemapLoom(opts.mcVersion);
-  const split = supportsSplitSources(opts.mcVersion);
+  const split = wantsSplitSources(opts);
 
   if (remap) {
     content = content.replace(

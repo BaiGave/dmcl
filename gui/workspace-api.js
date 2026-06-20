@@ -36,6 +36,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.cancelSourceJobs = cancelSourceJobs;
 exports.handleWorkspaceApi = handleWorkspaceApi;
 exports.initWorkspace = initWorkspace;
 exports.ws = ws;
@@ -99,12 +100,27 @@ function pickBuildableVariants(variants, opts) {
     return { buildable: sortVariantsForBuild(buildable), skipped };
 }
 let wsMod = null;
+let minecraftSourcesMod = null;
 async function ws() {
     if (!wsMod) {
         const projectRoot = node_path_1.default.resolve(__dirname, "..");
         wsMod = await (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("workspace", "index.js"));
     }
     return wsMod;
+}
+async function minecraftSources() {
+    if (!minecraftSourcesMod) {
+        minecraftSourcesMod = await (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("sources", "index.js"));
+    }
+    return minecraftSourcesMod;
+}
+async function cancelSourceJobs() {
+    try {
+        (await minecraftSources()).cancelMinecraftSourceTask();
+    }
+    catch {
+        // App shutdown must continue even when the source module was never loaded.
+    }
 }
 async function readBody(req) {
     return new Promise((resolve) => {
@@ -257,11 +273,38 @@ async function handleWorkspaceApi(req, res, urlPath, method) {
         json(res, { ok, deleteFiles, fileResult, mods: store.getMods() });
         return true;
     }
+    // GET /api/mods/:id/detail — 单次磁盘扫描 + 矩阵（详情页专用）
+    const detailMatch = urlPath.match(/^\/api\/mods\/([^/]+)\/detail$/);
+    if (detailMatch && method === "GET") {
+        store.refresh();
+        const m = store.getMod(detailMatch[1]);
+        if (!m) {
+            json(res, { error: "模组不存在" }, 404);
+            return true;
+        }
+        const matrix = await mod.buildMatrix(m);
+        const sources = await minecraftSources();
+        const detailMod = {
+            ...m,
+            variants: m.variants.map((variant) => ({
+                ...variant,
+                sourceStatus: sources.getProjectSourceStatus(variant.projectPath),
+            })),
+        };
+        json(res, {
+            mod: detailMod,
+            matrix: mod.serializeMatrixResult(matrix),
+        });
+        return true;
+    }
     // GET /api/mods/:id/matrix
     const matrixMatch = urlPath.match(/^\/api\/mods\/([^/]+)\/matrix$/);
     if (matrixMatch && method === "GET") {
-        store.refresh();
-        const m = store.getMod(matrixMatch[1]);
+        let m = store.getMod(matrixMatch[1]);
+        if (!m) {
+            store.refresh();
+            m = store.getMod(matrixMatch[1]);
+        }
         if (!m) {
             json(res, { error: "模组不存在" }, 404);
             return true;
@@ -393,6 +436,10 @@ async function handleWorkspaceApi(req, res, urlPath, method) {
     // POST /api/mods/register
     if (urlPath === "/api/mods/register" && method === "POST") {
         const body = (await readBody(req));
+        if (!body.loader || !["fabric", "forge", "neoforge"].includes(body.loader)) {
+            json(res, { error: "无效的 loader" }, 400);
+            return true;
+        }
         let m = store.findModByModId(body.modId);
         if (!m) {
             try {
@@ -437,6 +484,50 @@ async function handleWorkspaceApi(req, res, urlPath, method) {
             repoRoot: mod.getRepoRoot(),
             concurrency: getConcurrencySettingsPayload(),
         });
+        return true;
+    }
+    // GET /api/sources/status — 源码仓库、已完成版本与当前后台任务
+    if (urlPath === "/api/sources/status" && method === "GET") {
+        const sources = await minecraftSources();
+        json(res, sources.getMinecraftSourceStatus());
+        return true;
+    }
+    // POST /api/sources/start — 单版本或当前加载器的全部版本
+    if (urlPath === "/api/sources/start" && method === "POST") {
+        const body = (await readBody(req));
+        if (!body.scope || !["single", "all"].includes(body.scope)) {
+            json(res, { error: "请选择源码获取范围" }, 400);
+            return true;
+        }
+        if (!body.loader || !["fabric", "forge", "neoforge"].includes(body.loader)) {
+            json(res, { error: "请选择加载器" }, 400);
+            return true;
+        }
+        if (body.scope === "single" && !body.mcVersion) {
+            json(res, { error: "请选择 Minecraft 版本" }, 400);
+            return true;
+        }
+        try {
+            const sources = await minecraftSources();
+            const task = sources.startMinecraftSourceTask({
+                scope: body.scope,
+                loader: body.loader,
+                mcVersion: body.mcVersion,
+                mapping: body.mapping,
+                force: body.force === true,
+                mirror: body.mirror !== false,
+            });
+            json(res, { ok: true, task }, 202);
+        }
+        catch (err) {
+            json(res, { error: err.message }, 409);
+        }
+        return true;
+    }
+    // POST /api/sources/cancel
+    if (urlPath === "/api/sources/cancel" && method === "POST") {
+        const sources = await minecraftSources();
+        json(res, { ok: true, task: sources.cancelMinecraftSourceTask() });
         return true;
     }
     // POST /api/settings/concurrency
@@ -505,6 +596,39 @@ async function handleWorkspaceApi(req, res, urlPath, method) {
         json(res, { jobId, queue: (0, build_queue_1.getQueueStatus)() });
         return true;
     }
+    // POST /api/variants/:id/sources — 按当前变体自动准备 MC 与前置模组源码
+    const sourceMatch = urlPath.match(/^\/api\/variants\/([^/]+)\/sources$/);
+    if (sourceMatch && method === "POST") {
+        const found = store.getVariant(sourceMatch[1]);
+        if (!found) {
+            json(res, { error: "变体不存在" }, 404);
+            return true;
+        }
+        if (!node_fs_1.default.existsSync(found.variant.projectPath)) {
+            json(res, { error: "项目目录不存在，请先重新定位项目" }, 400);
+            return true;
+        }
+        const body = (await readBody(req));
+        try {
+            const sources = await minecraftSources();
+            const task = sources.startMinecraftSourceTask({
+                scope: "single",
+                loader: found.variant.loader,
+                mcVersion: found.variant.mcVersion,
+                mapping: found.variant.mappings,
+                projectPath: found.variant.projectPath,
+                projectModId: found.mod.modId,
+                includeDependencies: true,
+                force: body.force === true,
+                mirror: true,
+            });
+            json(res, { ok: true, task }, 202);
+        }
+        catch (err) {
+            json(res, { error: err.message }, 409);
+        }
+        return true;
+    }
     // POST /api/variants/:id/run
     const runMatch = urlPath.match(/^\/api\/variants\/([^/]+)\/run$/);
     if (runMatch && method === "POST") {
@@ -563,6 +687,7 @@ async function handleWorkspaceApi(req, res, urlPath, method) {
     const buildAllMatch = urlPath.match(/^\/api\/mods\/([^/]+)\/build-all$/);
     if (buildAllMatch && method === "POST") {
         const body = (await readBody(req));
+        store.refresh({ force: true });
         const m = store.getMod(buildAllMatch[1]);
         if (!m) {
             json(res, { error: "模组不存在" }, 404);
@@ -829,9 +954,11 @@ async function handleWorkspaceApi(req, res, urlPath, method) {
     }
     return false;
 }
-async function initWorkspace(repoRoot) {
+async function initWorkspace(repoRoot, writableProjectsRoot) {
     const mod = await ws();
     mod.setRepoRoot(repoRoot);
+    if (writableProjectsRoot)
+        mod.setProjectsRoot(writableProjectsRoot);
     mod.ensureProjectsRoot();
     const store = mod.getWorkspace();
     const projectsRoot = mod.getProjectsRoot();
@@ -841,6 +968,10 @@ async function initWorkspace(repoRoot) {
     mod.reconcileWorkspace(store);
     const projectRoot = node_path_1.default.resolve(__dirname, "..");
     (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("meta", "meta-cache.js"))
-        .then(({ getMetaCache }) => getMetaCache().refreshIfStale())
+        .then(({ getMetaCache }) => {
+        const cache = getMetaCache();
+        cache.refreshIfStale();
+        void cache.get({ strategy: "cache-first" }).catch(() => { });
+    })
         .catch((err) => console.warn("[dmcl] 元数据缓存初始化跳过:", err));
 }

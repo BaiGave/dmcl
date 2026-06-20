@@ -32,6 +32,7 @@
         selectedLoader: "",
         selectedMc: "",
         selectedMappings: "",
+        selectedSideLayout: "unified",
         modidTouched: false,
         groupTouched: false,
         generationCancelled: false,
@@ -52,19 +53,37 @@
   });
 
   // gui/renderer-src/constants.ts
-  var LOADERS, LOADER_LABELS, STATUS_LABELS;
+  var LOADERS, LOADER_LABELS, SIDE_LAYOUT_OPTIONS, SIDE_LAYOUT_HINTS, SIDE_LAYOUT_HOVER_TIPS, STATUS_LABELS;
   var init_constants = __esm({
     "gui/renderer-src/constants.ts"() {
       "use strict";
       LOADERS = [
-        { id: "fabric", label: "Fabric", icon: "Fa", hint: "\u8F7B\u91CF\u3001\u66F4\u65B0\u5FEB" },
-        { id: "neoforge", label: "NeoForge", icon: "NF", hint: "\u73B0\u4EE3\u5206\u652F" },
-        { id: "forge", label: "Forge", icon: "Fo", hint: "\u7ECF\u5178\u751F\u6001" }
+        { id: "fabric", label: "Fabric", hint: "\u8F7B\u91CF\u3001\u66F4\u65B0\u5FEB" },
+        { id: "forge", label: "Forge", hint: "\u7ECF\u5178\u751F\u6001" },
+        { id: "neoforge", label: "NeoForge", hint: "\u73B0\u4EE3\u5206\u652F" }
       ];
       LOADER_LABELS = {
         fabric: "Fabric",
         forge: "Forge",
         neoforge: "NeoForge"
+      };
+      SIDE_LAYOUT_OPTIONS = [
+        { id: "split", label: "\u5BA2\u6237\u7AEF / \u901A\u7528\u5206\u79BB\uFF08main + client\uFF09" },
+        { id: "unified", label: "\u5BA2\u6237\u7AEF + \u670D\u52A1\u7AEF\u4E00\u8D77\uFF08\u5355\u6E90\u7801\u96C6\uFF09" },
+        { id: "client", label: "\u4EC5\u5BA2\u6237\u7AEF" },
+        { id: "server", label: "\u4EC5\u670D\u52A1\u7AEF" }
+      ];
+      SIDE_LAYOUT_HINTS = {
+        unified: "\u7ED3\u6784\u6700\u7B80\u5355\uFF0C\u9002\u5408\u5165\u95E8\u548C\u5C0F\u578B\u53CC\u7AEF\u6A21\u7EC4\uFF1B\u6CE8\u610F\u522B\u628A\u6E32\u67D3\u3001\u6309\u952E\u7B49\u5BA2\u6237\u7AEF API \u5199\u8FDB\u4F1A\u5728\u670D\u52A1\u7AEF\u6267\u884C\u7684\u4EE3\u7801\u3002",
+        split: "\u63A8\u8350\u5927\u591A\u6570\u53CC\u7AEF\u6A21\u7EC4\uFF1ALoom \u5728\u7F16\u8BD1\u671F\u9694\u79BB\u5BA2\u6237\u7AEF\u4EE3\u7801\uFF0C\u4E0E Fabric \u5B98\u65B9\u6A21\u677F\u4E00\u81F4\uFF0C\u540E\u671F\u7EF4\u62A4\u66F4\u5B89\u5168\u3002",
+        client: "\u9002\u5408 HUD\u3001\u6E32\u67D3\u3001\u6309\u952E\u7B49\u7EAF\u5BA2\u6237\u7AEF\u529F\u80FD\uFF1B\u4E0D\u80FD\u88C5\u5728\u65E0\u5BA2\u6237\u7AEF\u7684\u4E13\u7528\u670D\u52A1\u5668\u4E0A\u3002",
+        server: "\u9002\u5408\u73A9\u6CD5\u673A\u5236\u3001\u6307\u4EE4\u3001\u6570\u636E\u903B\u8F91\u7B49\uFF1B\u73A9\u5BB6\u5BA2\u6237\u7AEF\u4E0D\u5FC5\u5B89\u88C5\uFF08\u8054\u673A\u65F6\u53EA\u88C5\u670D\u52A1\u7AEF\u5373\u53EF\uFF09\u3002"
+      };
+      SIDE_LAYOUT_HOVER_TIPS = {
+        unified: "\u9002\u5408\u65B0\u624B \xB7 \u5355\u6E90\u7801\u96C6\uFF0C\u5165\u95E8\u9996\u9009",
+        split: "\u9002\u5408\u4E2D\u5927\u578B\u53CC\u7AEF\u6A21\u7EC4 \xB7 \u7F16\u8BD1\u671F\u9694\u79BB\u5BA2\u6237\u7AEF\u4EE3\u7801",
+        client: "\u7EAF\u5BA2\u6237\u7AEF\u529F\u80FD \xB7 \u4E0D\u80FD\u88C5\u4E13\u7528\u670D",
+        server: "\u7EAF\u670D\u52A1\u7AEF\u73A9\u6CD5 \xB7 \u5BA2\u6237\u7AEF\u4E0D\u5FC5\u5B89\u88C5"
       };
       STATUS_LABELS = {
         active: "\u5F00\u53D1\u4E2D",
@@ -75,6 +94,16 @@
   });
 
   // gui/renderer-src/icons.ts
+  function escHtml(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+  function loaderIcon(loader) {
+    if (loader !== "fabric" && loader !== "forge" && loader !== "neoforge") {
+      return `<span class="loader-icon-fallback">${escHtml(loader.slice(0, 2).toUpperCase())}</span>`;
+    }
+    const def = loaderIconDefs[loader];
+    return `<svg class="loader-icon loader-icon-${loader}" viewBox="${def.viewBox}" aria-hidden="true" focusable="false">${def.inner}</svg>`;
+  }
   function icon(name) {
     return `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${paths[name]}</svg>`;
   }
@@ -84,7 +113,7 @@
       if (paths[name]) el.innerHTML = icon(name);
     });
   }
-  var paths;
+  var paths, loaderIconDefs;
   var init_icons = __esm({
     "gui/renderer-src/icons.ts"() {
       "use strict";
@@ -117,6 +146,20 @@
         loader: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8"/>',
         close: '<path d="m6 6 12 12M18 6 6 18"/>',
         sparkles: '<path d="m12 3 1.2 3.8L17 8l-3.8 1.2L12 13l-1.2-3.8L7 8l3.8-1.2ZM18.5 14l.7 2.3 2.3.7-2.3.7-.7 2.3-.7-2.3-2.3-.7 2.3-.7ZM5 14l.6 1.8 1.9.7-1.9.6L5 19l-.6-1.9-1.9-.6 1.9-.7Z"/>'
+      };
+      loaderIconDefs = {
+        fabric: {
+          viewBox: "620 620 280 280",
+          inner: '<path fill="currentColor" d="m820 761-85.6-87.6c-4.6-4.7-10.4-9.6-25.9 1-19.9 13.6-8.4 21.9-5.2 25.4 8.2 9 84.1 89 97.2 104 2.5 2.8-20.3-22.5-6.5-39.7 5.4-7 18-12 26-3 6.5 7.3 10.7 18-3.4 29.7-24.7 20.4-102 82.4-127 103-12.5 10.3-28.5 2.3-35.8-6-7.5-8.9-30.6-34.6-51.3-58.2-5.5-6.3-4.1-19.6 2.3-25 35-30.3 91.9-73.8 111.9-90.8"/>'
+        },
+        forge: {
+          viewBox: "0 0 24 24",
+          inner: '<path fill="currentColor" d="M2 7.5h8v-2h12v2s-7 3.4-7 6 3.1 3.1 3.1 3.1l.9 3.9H5l1-4.1s3.8.1 4-2.9c.2-2.7-6.5-.7-8-6"/>'
+        },
+        neoforge: {
+          viewBox: "0 0 24 24",
+          inner: '<path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" d="M12 19.2v2m0-2v2M8.4 1.3c.5 1.5.7 3 .1 4.6-.2.5-.9 1.5-1.6 1.5m8.7-6.1c-.5 1.5-.7 3-.1 4.6.2.6.9 1.5 1.6 1.5M3.6 15.8H1.9m18.5 0h1.7M3.2 12.1H1.5m19.3 0h1.8M8.1 12.7v1.6m7.8-1.6v1.6M10.8 18H12m0 1.2L10.8 18m2.4 0H12m0 1.2 1.2-1.2M4 9.7c-.5 1.2-.8 2.4-.8 3.7 0 3.1 2.9 6.3 5.3 8.2.9.7 2.2 1.1 3.4 1.1M12 4.9c-1.1 0-2.1.2-3.2.7M20 9.7c.5 1.2.8 2.4.8 3.7 0 3.1-2.9 6.3-5.3 8.2-.9.7-2.2 1.1-3.4 1.1M12 4.9c1.1 0 2.1.2 3.2.7M4 9.7c-.2-1.8-.3-3.7.5-5.5s2.2-2.6 3.9-3M20 9.7c.2-1.9.3-3.7-.5-5.5s-2.2-2.6-3.9-3M12 21.2l-2.4.4m2.4-.4 2.4.4"/>'
+        }
       };
     }
   });
@@ -277,6 +320,16 @@
   // gui/renderer-src/boot.ts
   function bootWorkbench() {
     hydrateIcons();
+    initLoaderFilterChips();
+    function initLoaderFilterChips() {
+      document.querySelectorAll("[data-loader-filter]").forEach(function(chip) {
+        var loader = chip.dataset.loaderFilter;
+        if (!loader || loader === "all") return;
+        chip.classList.add("loader-" + loader);
+        var label = chip.textContent?.trim() || LOADER_LABELS[loader] || loader;
+        chip.innerHTML = loaderIcon(loader) + "<span>" + esc(label) + "</span>";
+      });
+    }
     var reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     if (!reduceMotion && !sessionStorage.getItem("dmcl:intro-played")) {
       sessionStorage.setItem("dmcl:intro-played", "1");
@@ -413,6 +466,11 @@
         var description = $("empty-description");
         var primary = $("empty-primary");
         var secondary = $("empty-secondary");
+        var illustration = $("empty-illustration");
+        var emptyIcon = $("empty-icon");
+        var showGenesis = !state.mods.length;
+        if (illustration) illustration.hidden = !showGenesis;
+        if (emptyIcon) emptyIcon.hidden = showGenesis;
         if (!state.mods.length) {
           if (title) title.textContent = "\u5F00\u59CB\u4F60\u7684\u7B2C\u4E00\u4E2A\u6A21\u7EC4";
           if (description) description.textContent = "\u4ECE\u6A21\u677F\u521B\u5EFA\u65B0\u9879\u76EE\uFF0C\u6216\u5BFC\u5165\u5DF2\u6709 Gradle \u6A21\u7EC4\u3002";
@@ -453,7 +511,7 @@
         card.className = "mod-card" + (state.currentModId === mod.id ? " selected" : "");
         var health = buildHealthData(mod);
         var variants = (mod.variants || []).slice(0, 3).map(function(v) {
-          return '<span class="variant-chip"><i class="loader-mark loader-' + esc(v.loader) + '">' + esc((LOADER_LABELS[v.loader] || v.loader).slice(0, 1)) + "</i>" + esc(LOADER_LABELS[v.loader] + " " + v.mcVersion) + "</span>";
+          return '<span class="variant-chip"><i class="loader-mark loader-' + esc(v.loader) + '">' + loaderIcon(v.loader) + "</i>" + esc(LOADER_LABELS[v.loader] + " " + v.mcVersion) + "</span>";
         }).join("");
         var remaining = Math.max(0, (mod.variants || []).length - 3);
         card.innerHTML = '<button type="button" class="mod-card-main" aria-label="\u6253\u5F00\u6A21\u7EC4 ' + esc(mod.displayName) + "\uFF0C" + buildHealth(mod) + '"><span class="mod-avatar">' + esc(modInitials(mod.displayName)) + '</span><span class="mod-card-content"><span class="mod-title-row"><strong>' + esc(mod.displayName) + '</strong><span class="badge badge-' + mod.status + '">' + STATUS_LABELS[mod.status] + '</span></span><span class="variant-chips">' + (variants || '<span class="variant-chip muted">\u6682\u65E0\u53D8\u4F53</span>') + (remaining ? '<span class="variant-chip more">+' + remaining + "</span>" : "") + '</span><span class="health-row"><span class="health-track"><i data-health="' + health.percent + '"></i></span><span>' + health.ready + "/" + health.total + " \u5C31\u7EEA" + (health.failed ? " \xB7 " + health.failed + " \u5931\u8D25" : "") + (health.running ? " \xB7 " + health.running + " \u6784\u5EFA\u4E2D" : "") + '</span></span><span class="last-built">' + icon("clock") + lastBuilt(mod) + '</span></span><span class="card-chevron">' + icon("chevron-left") + "</span></button>";
@@ -579,7 +637,7 @@
       });
       $("detail-name").textContent = fromList ? fromList.displayName : "\u52A0\u8F7D\u4E2D\u2026";
       $("detail-meta").innerHTML = fromList ? "<span>modId: " + esc(fromList.modId) + "</span><span>\u52A0\u8F7D\u8BE6\u60C5\u2026</span>" : "<span>\u52A0\u8F7D\u4E2D\u2026</span>";
-      renderMatrixLoading("\u52A0\u8F7D\u7248\u672C\u77E9\u9635\u2026", "\u6B63\u5728\u8BFB\u53D6\u6A21\u7EC4\u8BE6\u60C5\u4E0E\u652F\u6301\u8303\u56F4");
+      renderMatrixLoading("\u52A0\u8F7D\u7248\u672C\u77E9\u9635\u2026", "\u6B63\u5728\u8BFB\u53D6\u6A21\u7EC4\u8BE6\u60C5\u4E0E\u652F\u6301\u77E9\u9635");
       $("variant-list").innerHTML = '<p class="muted-placeholder inline-empty">\u52A0\u8F7D\u53D8\u4F53\u5217\u8868\u2026</p>';
     }
     async function openDetail(modId) {
@@ -613,17 +671,14 @@
           setMatrixRefreshing(true);
           setMatrixLoadingMeta(true, "\u5237\u65B0\u4E2D\u2026");
         } else {
-          renderMatrixLoading("\u52A0\u8F7D\u7248\u672C\u77E9\u9635\u2026", "\u6B63\u5728\u67E5\u8BE2 loader \u4E0E Minecraft \u7248\u672C\u7EC4\u5408");
+          renderMatrixLoading("\u52A0\u8F7D\u7248\u672C\u77E9\u9635\u2026", "\u6B63\u5728\u7EC4\u88C5\u652F\u6301\u77E9\u9635\uFF08\u4F18\u5148\u4F7F\u7528\u672C\u5730\u5143\u6570\u636E\u7F13\u5B58\uFF09");
         }
       }
       try {
-        var modData = await api("/api/mods/" + modId);
+        var detailData = await api("/api/mods/" + modId + "/detail");
         if (requestId !== state.detailRequestId || modId !== state.currentModId) return;
-        if (showMatrixRefresh && !cached) {
-          renderMatrixLoading("\u52A0\u8F7D\u7248\u672C\u77E9\u9635\u2026", "\u6B63\u5728\u8BA1\u7B97 " + modData.mod.modId + " \u7684\u652F\u6301\u77E9\u9635");
-        }
-        var matrixData = await api("/api/mods/" + modId + "/matrix");
-        if (requestId !== state.detailRequestId || modId !== state.currentModId) return;
+        var modData = { mod: detailData.mod };
+        var matrixData = detailData.matrix;
         state.detailCache[modId] = {
           mod: modData.mod,
           matrix: matrixData,
@@ -646,8 +701,6 @@
       if (status === "failed") return "\u5931\u8D25";
       if (status === "building") return "\u6784\u5EFA\u4E2D";
       if (status === "exists") return "\u5DF2\u5B58\u5728";
-      if (status === "verified") return "\u5DF2\u9A8C\u8BC1";
-      if (status === "verification-failed") return "\u9A8C\u8BC1\u5931\u8D25";
       if (status === "available") return "\u53EF\u521B\u5EFA";
       return "\u4E0D\u652F\u6301";
     }
@@ -669,8 +722,8 @@
       matrix.loaders.forEach(function(ldr) {
         var tr = document.createElement("tr");
         var th = document.createElement("th");
-        th.className = "row-head";
-        th.textContent = ldr.label;
+        th.className = "row-head loader-row-head loader-" + ldr.id;
+        th.innerHTML = loaderIcon(ldr.id) + "<span>" + esc(ldr.label) + "</span>";
         tr.appendChild(th);
         matrix.versions.forEach(function(ver) {
           var cell = matrix.cells.find(function(c) {
@@ -679,7 +732,7 @@
           var td = document.createElement("td");
           var status = cell ? cell.status : "unsupported";
           td.className = "cell-" + status;
-          var matrixMatches = state.matrixFilter === "all" || state.matrixFilter === "available" && (status === "available" || status === "verified" || status === "verification-failed") || state.matrixFilter === "failed" && (status === "failed" || status === "verification-failed") || state.matrixFilter === "existing" && (status === "built" || status === "exists" || status === "building");
+          var matrixMatches = state.matrixFilter === "all" || state.matrixFilter === "available" && status === "available" || state.matrixFilter === "failed" && status === "failed" || state.matrixFilter === "existing" && (status === "built" || status === "exists" || status === "building");
           if (!matrixMatches) td.classList.add("matrix-muted");
           var actionButton = document.createElement("button");
           actionButton.type = "button";
@@ -688,17 +741,11 @@
           actionButton.setAttribute("aria-label", ldr.label + " " + ver + "\uFF0C" + cellLabel(status));
           actionButton.disabled = status === "unsupported" || status === "building";
           td.title = ldr.label + " " + ver + " \u2014 " + cellLabel(status);
-          if (cell && cell.verification && cell.verification.updatedAt) {
-            td.title += " / verified: " + cell.verification.state + " @ " + cell.verification.updatedAt;
-          }
-          if (cell && cell.verification && cell.verification.failureSummary) {
-            td.title += " / " + cell.verification.failureSummary;
-          }
           if (status === "built" || status === "failed" || status === "exists") {
             actionButton.addEventListener("click", function() {
               scrollToVariant(cell.variantId);
             });
-          } else if (status === "available" || status === "verified" || status === "verification-failed") {
+          } else if (status === "available") {
             actionButton.addEventListener("click", function() {
               generateVariantFromMatrix(mod, ldr.id, ver);
             });
@@ -732,8 +779,63 @@
       if (!mod.variants.length) return null;
       return mod.variants[0];
     }
+    function pickSourceVariantForMc(mod, mcVersion) {
+      return (mod.variants || []).find(function(v) {
+        return v.mcVersion === mcVersion;
+      }) || pickSourceVariant(mod);
+    }
+    async function consumeVariantGenerationStream(resp) {
+      if (!resp.ok) {
+        var errText = "";
+        try {
+          errText = await resp.text();
+        } catch {
+        }
+        throw new Error(errText || "HTTP " + resp.status);
+      }
+      if (!resp.body) throw new Error("\u670D\u52A1\u5668\u672A\u8FD4\u56DE\u6D41\u5F0F\u54CD\u5E94");
+      var reader = resp.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = "";
+      var exitCode = 0;
+      var lastErrorLine = "";
+      while (true) {
+        var chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        var lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        lines.forEach(function(line) {
+          if (!line.trim()) return;
+          if (line.indexOf("__EXIT__:") === 0) {
+            exitCode = parseInt(line.slice(9), 10);
+            return;
+          }
+          if (line.indexOf("__") === 0) return;
+          if (line.indexOf("\u9519\u8BEF\uFF1A") === 0) lastErrorLine = line.slice(3);
+        });
+      }
+      if (exitCode !== 0 && lastErrorLine) throw new Error(lastErrorLine);
+      return exitCode;
+    }
+    async function generateVariantQuiet(mod, loader, mcVersion) {
+      var source = pickSourceVariantForMc(mod, mcVersion);
+      if (!source) throw new Error("\u6CA1\u6709\u53EF\u7528\u7684\u6E90\u53D8\u4F53");
+      var resp = await fetch("/api/mods/" + mod.id + "/variants", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceVariantId: source.id,
+          targetLoader: loader,
+          targetMc: mcVersion,
+          autoBuild: false
+        })
+      });
+      var exitCode = await consumeVariantGenerationStream(resp);
+      if (exitCode !== 0) throw new Error("\u751F\u6210\u5931\u8D25\uFF08\u9000\u51FA\u7801 " + exitCode + "\uFF09");
+    }
     async function generateVariantFromMatrix(mod, loader, mc) {
-      var source = pickSourceVariant(mod);
+      var source = pickSourceVariantForMc(mod, mc);
       if (!source) {
         showError("\u8BF7\u5148\u6709\u81F3\u5C11\u4E00\u4E2A\u53D8\u4F53\u4F5C\u4E3A\u6E90\u7801\u6765\u6E90");
         return;
@@ -759,11 +861,11 @@
             autoBuild: true
           })
         });
+        var log = $("modal-log");
+        if (log) log.innerHTML = "";
         var reader = resp.body.getReader();
         var decoder = new TextDecoder();
         var buffer = "";
-        var log = $("modal-log");
-        log.innerHTML = "";
         var exitCode = 0;
         while (true) {
           var result = await reader.read();
@@ -778,11 +880,12 @@
               return;
             }
             if (line.indexOf("__") === 0) return;
+            if (!log) return;
             var div = document.createElement("div");
             div.textContent = line;
             log.appendChild(div);
           });
-          log.scrollTop = log.scrollHeight;
+          if (log) log.scrollTop = log.scrollHeight;
         }
         if (exitCode !== 0) throw new Error("\u751F\u6210\u5931\u8D25\uFF08\u9000\u51FA\u7801 " + exitCode + "\uFF09");
         await loadMods();
@@ -807,7 +910,9 @@
         item.dataset.variantId = v.id;
         var statusText = v.buildStatus === "success" ? "\u5C31\u7EEA" : v.buildStatus === "failed" ? "\u5931\u8D25" : v.buildStatus === "building" ? "\u4EFB\u52A1\u8FDB\u884C\u4E2D" : "\u672A\u9A8C\u8BC1";
         var missingBtn = "";
-        item.innerHTML = '<div class="variant-item-header"><span class="loader-badge loader-' + esc(v.loader) + '">' + esc((LOADER_LABELS[v.loader] || v.loader).slice(0, 2)) + "</span><div><h4>" + LOADER_LABELS[v.loader] + " " + esc(v.mcVersion) + " <span>\xB7 v" + esc(v.modVersion) + '</span></h4><div class="path" title="' + esc(v.projectPath) + '">' + esc(v.projectPath) + '</div><div class="variant-status"><span class="status-dot"></span>' + statusText + '</div></div></div><div class="variant-actions"><button class="btn btn-primary btn-sm" data-action="build">' + icon("build") + '\u6784\u5EFA</button><button class="btn btn-secondary btn-sm" data-action="run">' + icon("play") + '\u542F\u52A8</button><button class="btn btn-secondary btn-sm" data-action="logs">' + icon("terminal") + '\u65E5\u5FD7</button><button class="btn btn-icon" data-action="folder" title="\u6253\u5F00\u9879\u76EE\u6587\u4EF6\u5939" aria-label="\u6253\u5F00\u9879\u76EE\u6587\u4EF6\u5939">' + icon("folder") + '</button><details class="action-menu"><summary class="btn btn-quiet btn-sm" aria-label="\u66F4\u591A\u53D8\u4F53\u64CD\u4F5C">' + icon("more") + '</summary><div class="action-menu-popover"><button data-action="cursor">\u7528 Cursor \u6253\u5F00</button><button data-action="relocate">\u91CD\u65B0\u5B9A\u4F4D\u9879\u76EE</button>' + missingBtn + '<span class="menu-separator"></span><button data-action="unlink">\u4EC5\u79FB\u9664\u767B\u8BB0</button><button class="menu-danger" data-action="delete">\u5220\u9664\u53D8\u4F53</button></div></details></div>';
+        var sourceReady = v.sourceStatus?.ready === true;
+        var sourceText = sourceReady ? "\u5F00\u53D1\u6E90\u7801\u5DF2\u51C6\u5907 \xB7 MC + " + (v.sourceStatus.modCount || 0) + " \u4E2A\u524D\u7F6E" : "\u5F00\u53D1\u6E90\u7801\u5C1A\u672A\u51C6\u5907";
+        item.innerHTML = '<div class="variant-item-header"><span class="loader-badge loader-' + esc(v.loader) + '">' + loaderIcon(v.loader) + "</span><div><h4>" + LOADER_LABELS[v.loader] + " " + esc(v.mcVersion) + " <span>\xB7 v" + esc(v.modVersion) + '</span></h4><div class="path" title="' + esc(v.projectPath) + '">' + esc(v.projectPath) + '</div><div class="variant-status"><span class="status-dot"></span>' + statusText + '</div><div class="variant-source-state' + (sourceReady ? " ready" : "") + '">' + icon("sparkles") + esc(sourceText) + '</div></div></div><div class="variant-actions"><button class="btn btn-primary btn-sm" data-action="build">' + icon("build") + '\u6784\u5EFA</button><button class="btn btn-secondary btn-sm" data-action="run">' + icon("play") + '\u542F\u52A8</button><button class="btn btn-secondary btn-sm" data-action="logs">' + icon("terminal") + '\u65E5\u5FD7</button><button class="btn btn-secondary btn-sm btn-prepare-sources" data-action="sources">' + icon(sourceReady ? "folder" : "sparkles") + (sourceReady ? "\u6253\u5F00\u5F00\u53D1\u6E90\u7801" : "\u51C6\u5907\u5F00\u53D1\u6E90\u7801") + '</button><button class="btn btn-icon" data-action="folder" title="\u6253\u5F00\u9879\u76EE\u6587\u4EF6\u5939" aria-label="\u6253\u5F00\u9879\u76EE\u6587\u4EF6\u5939">' + icon("folder") + '</button><details class="action-menu"><summary class="btn btn-quiet btn-sm" aria-label="\u66F4\u591A\u53D8\u4F53\u64CD\u4F5C">' + icon("more") + '</summary><div class="action-menu-popover"><button data-action="cursor">\u7528 Cursor \u6253\u5F00</button><button data-action="relocate">\u91CD\u65B0\u5B9A\u4F4D\u9879\u76EE</button>' + missingBtn + (sourceReady ? '<button data-action="sources-refresh">\u91CD\u65B0\u51C6\u5907\u5F00\u53D1\u6E90\u7801</button>' : "") + '<span class="menu-separator"></span><button data-action="unlink">\u4EC5\u79FB\u9664\u767B\u8BB0</button><button class="menu-danger" data-action="delete">\u5220\u9664\u53D8\u4F53</button></div></details></div>';
         item.querySelectorAll("[data-action]").forEach(function(btn) {
           btn.addEventListener("click", function(e) {
             e.stopPropagation();
@@ -818,6 +923,58 @@
         });
         list.appendChild(item);
       });
+    }
+    async function prepareVariantSources(modId, variant, force) {
+      hideError();
+      showModal("\u51C6\u5907\u5F00\u53D1\u6E90\u7801", "\u6B63\u5728\u8BC6\u522B Minecraft\u3001\u6620\u5C04\u4E0E Gradle \u524D\u7F6E\u4F9D\u8D56\u2026");
+      var cancelButton = $("modal-source-cancel");
+      if (cancelButton) cancelButton.hidden = false;
+      try {
+        var started = await api("/api/variants/" + variant.id + "/sources", {
+          method: "POST",
+          body: { force: force === true }
+        });
+        var taskId = started.task?.id;
+        if (!taskId) throw new Error("\u670D\u52A1\u7AEF\u672A\u8FD4\u56DE\u6E90\u7801\u4EFB\u52A1");
+        while (true) {
+          var status = await api("/api/sources/status");
+          var task = status.task;
+          if (!task || task.id !== taskId) throw new Error("\u6E90\u7801\u4EFB\u52A1\u72B6\u6001\u5DF2\u4E22\u5931");
+          var log = $("modal-log");
+          if (log) {
+            var dependencyProgress = task.currentPhase === "dependencies" ? task.dependenciesFound ? " \xB7 \u524D\u7F6E\u6A21\u7EC4 " + (task.dependenciesPrepared || 0) + "/" + task.dependenciesFound : " \xB7 Gradle \u6B63\u5728\u89E3\u6790\u524D\u7F6E\u4F9D\u8D56" : "";
+            var progress = "Minecraft " + task.completed + "/" + task.total + (task.currentPhase ? " \xB7 " + sourcePhaseLabel(task.currentPhase) : "") + dependencyProgress;
+            log.textContent = progress + "\n" + (task.logs || []).join("\n");
+            log.scrollTop = log.scrollHeight;
+          }
+          if (task.state !== "running") {
+            if (task.state === "completed") {
+              await api("/api/open-folder", { method: "POST", body: { path: task.outputPath } });
+              invalidateDetailCache(modId);
+              await refreshDetail({ force: true });
+              showModal(
+                "\u5F00\u53D1\u6E90\u7801\u5DF2\u51C6\u5907",
+                "\u9879\u76EE\u6E90\u7801\u76EE\u5F55\uFF1A" + task.outputPath + "\nMinecraft \u6E90\u7801\u4E0E " + (task.dependenciesPrepared || 0) + " \u4E2A\u524D\u7F6E\u6A21\u7EC4\u6E90\u7801\u5DF2\u5C31\u7EEA\u3002"
+              );
+              notify("\u5F00\u53D1\u6E90\u7801\u5DF2\u51C6\u5907\u5E76\u6253\u5F00\u6587\u4EF6\u5939", task.dependencyFailures ? "warning" : "success");
+            } else if (task.state === "cancelled") {
+              notify("\u6E90\u7801\u51C6\u5907\u5DF2\u53D6\u6D88", "warning");
+              closeModal();
+            } else {
+              throw new Error(task.lastError || "\u6E90\u7801\u51C6\u5907\u5931\u8D25");
+            }
+            break;
+          }
+          await new Promise(function(resolve) {
+            setTimeout(resolve, 1e3);
+          });
+        }
+      } catch (e) {
+        showError("\u51C6\u5907\u5F00\u53D1\u6E90\u7801\u5931\u8D25\uFF1A" + e.message);
+        showModal("\u6E90\u7801\u51C6\u5907\u5931\u8D25", e.message);
+      } finally {
+        if (cancelButton) cancelButton.hidden = true;
+      }
     }
     async function variantAction(modId, variant, action) {
       if (action === "build") {
@@ -832,6 +989,15 @@
         invalidateDetailCache(modId);
         await refreshDetail({ force: true });
         notify("\u5BA2\u6237\u7AEF\u6B63\u5728\u542F\u52A8\uFF0C\u8BF7\u7A0D\u5019\uFF08\u9996\u6B21\u9700\u4E0B\u8F7D\u4F9D\u8D56\uFF0C\u6E38\u620F\u7A97\u53E3\u6253\u5F00\u524D\u961F\u5217\u4F1A\u663E\u793A\u8FD0\u884C\u4E2D\uFF09");
+      } else if (action === "sources") {
+        if (variant.sourceStatus?.ready && variant.sourceStatus.rootPath) {
+          await api("/api/open-folder", { method: "POST", body: { path: variant.sourceStatus.rootPath } });
+          notify("\u5DF2\u6253\u5F00\u5F00\u53D1\u6E90\u7801\u6587\u4EF6\u5939");
+        } else {
+          await prepareVariantSources(modId, variant, false);
+        }
+      } else if (action === "sources-refresh") {
+        await prepareVariantSources(modId, variant, true);
       } else if (action === "folder") {
         await api("/api/open-folder", { method: "POST", body: { path: variant.projectPath } });
         notify("\u5DF2\u8BF7\u6C42\u6253\u5F00\u9879\u76EE\u6587\u4EF6\u5939");
@@ -1201,6 +1367,7 @@
           ["\u6A21\u7EC4", form.name + "  \xB7  " + form.modId],
           ["\u5F00\u53D1\u73AF\u5883", (LOADER_LABELS[state.selectedLoader] || state.selectedLoader) + "  \xB7  Minecraft " + state.selectedMc],
           ["\u6620\u5C04", state.selectedMappings || "Mojang \u5B98\u65B9\u6620\u5C04"],
+          ["\u8FD0\u884C\u7AEF", sideLayoutSummaryLabel()],
           ["\u9879\u76EE\u76EE\u5F55", $("inp-dir").value.trim()],
           ["\u955C\u50CF", form.mirror ? "\u4F7F\u7528\u56FD\u5185\u955C\u50CF" : "\u4F7F\u7528\u5B98\u65B9\u6E90"]
         ];
@@ -1217,7 +1384,7 @@
       LOADERS.forEach(function(ldr) {
         var c = document.createElement("label");
         c.className = "card";
-        c.innerHTML = '<input class="sr-only loader-radio" type="radio" name="loader" value="' + ldr.id + '"><span class="loader-card-mark">' + ldr.icon + '</span><span class="label">' + ldr.label + '</span><span class="hint">' + ldr.hint + '</span><span class="card-check">' + icon("check") + "</span>";
+        c.innerHTML = '<input class="sr-only loader-radio" type="radio" name="loader" value="' + ldr.id + '"><span class="loader-card-mark loader-' + ldr.id + '">' + loaderIcon(ldr.id) + '</span><span class="label">' + ldr.label + '</span><span class="hint">' + ldr.hint + '</span><span class="card-check">' + icon("check") + "</span>";
         function selectLoaderCard() {
           document.querySelectorAll(".card").forEach(function(x) {
             x.classList.remove("selected");
@@ -1246,6 +1413,7 @@
           });
         }
         refreshDefaultProjectPath();
+        updateSideLayoutUi();
         loadVersions(state.selectedLoader);
       });
       $("config-back").addEventListener("click", function() {
@@ -1312,11 +1480,14 @@
         state.selectedMc = $("sel-mc").value;
         syncProjectPath();
         updateMappingsUiForVersion(state.selectedMc);
+        updateSideLayoutUi();
         refreshMappings();
       });
       $("sel-mappings").addEventListener("change", function() {
         state.selectedMappings = $("sel-mappings").value;
       });
+      var sideLayoutPicker = $("side-layout-picker");
+      if (sideLayoutPicker) initSideLayoutPicker(sideLayoutPicker);
       $("gen-cancel").addEventListener("click", function() {
         state.generationCancelled = true;
         if (state.activeAbort) state.activeAbort.abort();
@@ -1337,6 +1508,101 @@
       var first = parseInt(parts[0], 10);
       if (first === 1) return false;
       return first >= 26;
+    }
+    function supportsSplitSourcesForMc(mc) {
+      if (!mc) return false;
+      var parts = mc.split(".").map(function(p) {
+        return parseInt(p, 10) || 0;
+      });
+      if (parts[0] === 1) return (parts[1] || 0) >= 18;
+      return parts[0] >= 18;
+    }
+    function initSideLayoutPicker(container) {
+      container.innerHTML = "";
+      SIDE_LAYOUT_OPTIONS.forEach(function(opt) {
+        var label = document.createElement("label");
+        label.className = "side-layout-option";
+        label.dataset.layout = opt.id;
+        var hoverTip = SIDE_LAYOUT_HOVER_TIPS[opt.id] || "";
+        label.title = hoverTip;
+        label.innerHTML = '<input class="sr-only" type="radio" name="side-layout" value="' + esc(opt.id) + '"><span class="side-layout-label">' + esc(opt.label) + '</span><span class="side-layout-hover-tip">' + esc(hoverTip) + "</span>";
+        label.addEventListener("click", function(e) {
+          var splitDisabled = opt.id === "split" && label.classList.contains("is-disabled");
+          if (splitDisabled) {
+            e.preventDefault();
+            return;
+          }
+          selectSideLayoutOption(opt.id);
+        });
+        container.appendChild(label);
+      });
+      selectSideLayoutOption(state.selectedSideLayout || defaultSideLayoutForSelection());
+    }
+    function selectSideLayoutOption(layoutId) {
+      state.selectedSideLayout = layoutId;
+      document.querySelectorAll(".side-layout-option").forEach(function(node) {
+        var el = node;
+        var radio = el.querySelector('input[type="radio"]');
+        var active = el.dataset.layout === layoutId && !el.classList.contains("is-disabled");
+        el.classList.toggle("selected", active);
+        if (radio) radio.checked = active;
+      });
+      updateSideLayoutHint();
+    }
+    function resolveSideLayoutForMc(loader, mc, requested) {
+      if (requested === "split" && loader === "fabric" && !supportsSplitSourcesForMc(mc)) return "unified";
+      return requested;
+    }
+    function sideLayoutBatchNote(requested, loader, versions) {
+      if (requested !== "split" || loader !== "fabric") {
+        return "\u8FD0\u884C\u7AEF\uFF1A" + sideLayoutSummaryLabel();
+      }
+      var fallbackCount = versions.filter(function(mc) {
+        return !supportsSplitSourcesForMc(mc);
+      }).length;
+      if (!fallbackCount) return "\u8FD0\u884C\u7AEF\uFF1A\u5BA2\u6237\u7AEF / \u901A\u7528\u5206\u79BB\uFF08\u5168\u90E8\u7248\u672C\u652F\u6301\uFF09";
+      return "\u8FD0\u884C\u7AEF\uFF1A\u5206\u79BB\uFF08\u5176\u4E2D " + fallbackCount + " \u4E2A\u65E7\u7248\u672C\u5C06\u81EA\u52A8\u6539\u4E3A\u300C\u4E00\u8D77\u300D\uFF09";
+    }
+    function defaultSideLayoutForSelection() {
+      return "unified";
+    }
+    function getSelectedSideLayout() {
+      var checked = document.querySelector('input[name="side-layout"]:checked');
+      return checked?.value || state.selectedSideLayout || defaultSideLayoutForSelection();
+    }
+    function sideLayoutSummaryLabel() {
+      var id = getSelectedSideLayout();
+      var opt = SIDE_LAYOUT_OPTIONS.find(function(o) {
+        return o.id === id;
+      });
+      return opt ? opt.label : id;
+    }
+    function updateSideLayoutHint() {
+      var hint = $("side-layout-hint");
+      if (!hint) return;
+      var layout = getSelectedSideLayout();
+      var text = SIDE_LAYOUT_HINTS[layout] || "";
+      if (state.selectedLoader !== "fabric") {
+        text += " Forge / NeoForge \u4F7F\u7528\u5355\u4E00 src/main \u6E90\u7801\u96C6\uFF1B\u300C\u5206\u79BB\u300D\u4E0E\u300C\u4E00\u8D77\u300D\u6548\u679C\u76F8\u540C\u3002";
+      } else if (layout === "split" && !supportsSplitSourcesForMc(state.selectedMc)) {
+        text += " \u5F53\u524D Minecraft \u7248\u672C\u4E0D\u652F\u6301 Loom \u5206\u6E90\uFF0C\u5C06\u81EA\u52A8\u4F7F\u7528\u5355\u6E90\u7801\u96C6\u3002";
+      }
+      hint.textContent = text;
+    }
+    function updateSideLayoutUi() {
+      var canSplit = state.selectedLoader === "fabric" && supportsSplitSourcesForMc(state.selectedMc);
+      document.querySelectorAll(".side-layout-option").forEach(function(node) {
+        var el = node;
+        if (el.dataset.layout !== "split") return;
+        el.classList.toggle("is-disabled", !canSplit);
+        var radio = el.querySelector('input[type="radio"]');
+        if (radio) radio.disabled = !canSplit;
+      });
+      if (!canSplit && getSelectedSideLayout() === "split") {
+        selectSideLayoutOption("unified");
+        return;
+      }
+      selectSideLayoutOption(getSelectedSideLayout() || defaultSideLayoutForSelection());
     }
     function updateMappingsUiForVersion(mc) {
       var mapGroup = $("sel-mappings")?.closest(".form-group");
@@ -1591,7 +1857,7 @@
         group = "com.example." + modId.replace(/_/g, "");
         $("inp-group").value = group;
       }
-      return { name, modId, group, mirror };
+      return { name, modId, group, mirror, sideLayout: getSelectedSideLayout() };
     }
     async function resolveMappingsForVersion(loader, mc) {
       if (loader === "fabric" && isUnobfuscatedMc(mc)) return "mojmap";
@@ -1690,7 +1956,9 @@
         "--dir",
         dir,
         "--mappings",
-        state.selectedMappings
+        state.selectedMappings,
+        "--side-layout",
+        resolveSideLayoutForMc(state.selectedLoader, state.selectedMc, form.sideLayout)
       ];
       if (!form.mirror) args.push("--no-mirror");
       try {
@@ -1744,7 +2012,7 @@
       if (!await confirmAction({
         title: "\u6279\u91CF\u521B\u5EFA\u6240\u6709\u7248\u672C",
         message: "\u5C06\u4E3A\u300C" + form.name + "\u300D\u521B\u5EFA " + loaderLabel + " \u7684\u5168\u90E8 " + versions.length + " \u4E2A\u7248\u672C\u3002",
-        detail: "\u4EFB\u52A1 " + maxSlots + " \u8DEF \xB7 Gradle \u6784\u5EFA\u6700\u591A " + gradleMax + " \u8DEF \xB7 \u5BA2\u6237\u7AEF\u9A8C\u8BC1\u6700\u591A " + clientMax + " \u8DEF\uFF08\u5B89\u5168\u9650\u6D41\uFF09\u3002\n\u5DF2\u5B58\u5728\u4E14\u975E\u7A7A\u7684\u76EE\u5F55\u4F1A\u8DF3\u8FC7\u3002",
+        detail: sideLayoutBatchNote(form.sideLayout, state.selectedLoader, versions) + "\n\u4EFB\u52A1 " + maxSlots + " \u8DEF \xB7 Gradle \u6784\u5EFA\u6700\u591A " + gradleMax + " \u8DEF \xB7 \u5BA2\u6237\u7AEF\u9A8C\u8BC1\u6700\u591A " + clientMax + " \u8DEF\uFF08\u5B89\u5168\u9650\u6D41\uFF09\u3002\n\u5DF2\u5B58\u5728\u4E14\u975E\u7A7A\u7684\u76EE\u5F55\u4F1A\u8DF3\u8FC7\u3002",
         confirmLabel: "\u5F00\u59CB\u6279\u91CF\u521B\u5EFA"
       })) return;
       hideError();
@@ -1793,7 +2061,9 @@
             "--dir",
             dir,
             "--mappings",
-            mappings
+            mappings,
+            "--side-layout",
+            resolveSideLayoutForMc(state.selectedLoader, mc, form.sideLayout)
           ];
           if (!form.mirror) args.push("--no-mirror");
           setPhase("gen");
@@ -1942,6 +2212,233 @@
         setText("meta-mappings-status", "\u8BFB\u53D6\u5931\u8D25");
       }
     }
+    var sourceStatusCache = null;
+    var sourcePollTimer = null;
+    var sourceOptionsToken = 0;
+    var lastSourceTaskNotice = "";
+    var sourceAutoOpenTask = null;
+    function sourcePhaseLabel(phase) {
+      return {
+        planning: "\u89C4\u5212\u7248\u672C\u4E0E\u6620\u5C04",
+        scaffolding: "\u51C6\u5907\u52A0\u8F7D\u5668\u5F00\u53D1\u73AF\u5883",
+        mapping: "\u751F\u6210\u6620\u5C04\u4EA7\u7269",
+        extracting: "\u63D0\u53D6\u4E0E\u53CD\u7F16\u8BD1\u6E90\u7801",
+        dependencies: "\u89E3\u6790\u5E76\u51C6\u5907\u524D\u7F6E\u6A21\u7EC4\u6E90\u7801",
+        linking: "\u5199\u5165\u9879\u76EE\u6E90\u7801\u5165\u53E3",
+        verifying: "\u6821\u9A8C\u6E90\u7801\u5B8C\u6574\u6027"
+      }[phase] || "\u5904\u7406\u4E2D";
+    }
+    function selectedSourceEntry() {
+      if (!sourceStatusCache) return null;
+      var loader = $("source-loader")?.value;
+      var mc = $("source-mc")?.value;
+      var mapping = $("source-mapping")?.value;
+      return (sourceStatusCache.entries || []).find(function(entry) {
+        return entry.loader === loader && entry.minecraftVersion === mc && entry.mapping === mapping;
+      }) || null;
+    }
+    function renderSelectedSourcePath() {
+      var entry = selectedSourceEntry();
+      var input = $("source-selected-path");
+      var open = $("btn-source-open-selected");
+      var copy = $("btn-source-copy-selected");
+      if (input) input.value = entry?.sourcePath || "";
+      if (open) open.disabled = !entry;
+      if (copy) copy.disabled = !entry;
+    }
+    function scheduleSourcePolling(running) {
+      if (running && !sourcePollTimer) {
+        sourcePollTimer = setInterval(function() {
+          void loadSourceStatus();
+        }, 1200);
+      } else if (!running && sourcePollTimer) {
+        clearInterval(sourcePollTimer);
+        sourcePollTimer = null;
+      }
+    }
+    function renderSourceStatus(data) {
+      sourceStatusCache = data;
+      var rootInput = $("source-root-path");
+      if (rootInput) rootInput.value = data.rootPath || "";
+      setText("source-library-count", "Minecraft " + (data.entries?.length || 0) + " \u7EC4 \xB7 \u524D\u7F6E\u6A21\u7EC4 " + (data.modEntries || 0) + " \u7EC4");
+      renderSelectedSourcePath();
+      var task = data.task;
+      var badge = $("source-state-badge");
+      var panel = $("source-progress-panel");
+      var cancel = $("btn-source-cancel");
+      var currentBtn = $("btn-source-current");
+      var allBtn = $("btn-source-all");
+      var force = $("source-force");
+      var controls = [$("source-loader"), $("source-mc"), $("source-mapping")];
+      var running = task?.state === "running";
+      controls.forEach(function(el) {
+        if (el) el.disabled = running;
+      });
+      if (currentBtn) currentBtn.disabled = running;
+      if (allBtn) allBtn.disabled = running;
+      if (force) force.disabled = running;
+      if (cancel) cancel.hidden = !running;
+      if (!task) {
+        if (badge) {
+          badge.textContent = data.entries?.length || data.modEntries ? "\u7F13\u5B58\u5C31\u7EEA" : "\u7F13\u5B58\u4E3A\u7A7A";
+          badge.className = "source-state-badge" + (data.entries?.length ? " completed" : "");
+        }
+        if (panel) panel.hidden = true;
+        scheduleSourcePolling(false);
+        return;
+      }
+      var stateLabels = { running: "\u8FD0\u884C\u4E2D", completed: "\u5DF2\u5B8C\u6210", failed: "\u5931\u8D25", cancelled: "\u5DF2\u53D6\u6D88" };
+      if (badge) {
+        badge.textContent = stateLabels[task.state] || task.state;
+        badge.className = "source-state-badge " + task.state;
+      }
+      if (panel) panel.hidden = false;
+      var current = task.current ? (LOADER_LABELS[task.current.loader] || task.current.loader) + " " + task.current.mcVersion : task.state === "running" ? "\u6B63\u5728\u51C6\u5907\u4EFB\u52A1" : "\u4EFB\u52A1\u7ED3\u675F";
+      setText("source-progress-title", current);
+      setText("source-progress-detail", task.state === "running" ? sourcePhaseLabel(task.currentPhase) : task.lastError || stateLabels[task.state] || task.state);
+      var pct = task.total ? Math.round(task.completed / task.total * 100) : 0;
+      var bar = $("source-progress-bar");
+      if (bar) bar.style.width = pct + "%";
+      var track = panel?.querySelector("[role=progressbar]");
+      if (track) track.setAttribute("aria-valuenow", String(pct));
+      setText("source-progress-stats", "\u8FDB\u5EA6 " + task.completed + "/" + task.total + " \xB7 \u6210\u529F " + task.successes + " \xB7 \u8DF3\u8FC7 " + task.skipped + " \xB7 \u5931\u8D25 " + task.failures);
+      var log = $("source-task-log");
+      if (log) {
+        log.textContent = (task.logs || []).join("\n") || "\u7B49\u5F85\u7B2C\u4E00\u6761\u4EFB\u52A1\u65E5\u5FD7\u2026";
+        log.scrollTop = log.scrollHeight;
+      }
+      scheduleSourcePolling(running);
+      if (!running) {
+        var noticeKey = task.id + ":" + task.state;
+        if (lastSourceTaskNotice !== noticeKey) {
+          lastSourceTaskNotice = noticeKey;
+          if (task.state === "completed") {
+            notify("\u6E90\u7801\u4EFB\u52A1\u5B8C\u6210\uFF1A\u6210\u529F " + task.successes + "\uFF0C\u8DF3\u8FC7 " + task.skipped + (task.failures ? "\uFF0C\u5931\u8D25 " + task.failures : ""), task.failures ? "warning" : "success");
+          } else if (task.state === "failed") {
+            notify("\u6E90\u7801\u4EFB\u52A1\u5931\u8D25\uFF1A" + (task.lastError || "\u8BF7\u67E5\u770B\u4EFB\u52A1\u65E5\u5FD7"), "error");
+          } else if (task.state === "cancelled") {
+            notify("\u6E90\u7801\u4EFB\u52A1\u5DF2\u53D6\u6D88", "warning");
+          }
+        }
+        if (task.state === "completed" && sourceAutoOpenTask?.id === task.id) {
+          var autoOpenPath = sourceAutoOpenTask.scope === "single" ? task.outputPath : data.rootPath;
+          sourceAutoOpenTask = null;
+          if (autoOpenPath) {
+            void api("/api/open-folder", { method: "POST", body: { path: autoOpenPath } }).then(function() {
+              notify("\u5DF2\u81EA\u52A8\u6253\u5F00\u6E90\u7801\u6587\u4EF6\u5939");
+            }).catch(function(e) {
+              showError("\u6E90\u7801\u5DF2\u5B8C\u6210\uFF0C\u4F46\u6253\u5F00\u6587\u4EF6\u5939\u5931\u8D25\uFF1A" + e.message);
+            });
+          }
+        }
+      }
+    }
+    async function loadSourceStatus() {
+      try {
+        renderSourceStatus(await api("/api/sources/status"));
+      } catch (e) {
+        scheduleSourcePolling(false);
+        setText("source-state-badge", "\u8BFB\u53D6\u5931\u8D25");
+      }
+    }
+    async function loadSourceMappings() {
+      var loader = $("source-loader").value;
+      var mc = $("source-mc").value;
+      var select = $("source-mapping");
+      if (!mc) return;
+      select.disabled = true;
+      try {
+        var data = await api("/api/mappings/" + loader + "/" + encodeURIComponent(mc));
+        select.innerHTML = "";
+        (data.options || []).filter(function(option) {
+          return option.available;
+        }).forEach(function(option) {
+          var item = document.createElement("option");
+          item.value = option.id;
+          item.textContent = option.label + (option.version ? " \xB7 " + option.version : "");
+          select.appendChild(item);
+        });
+        if (data.default) select.value = data.default;
+      } catch (e) {
+        select.innerHTML = '<option value="mojmap">\u5B98\u65B9\u9ED8\u8BA4\u6620\u5C04</option>';
+      } finally {
+        select.disabled = sourceStatusCache?.task?.state === "running";
+        renderSelectedSourcePath();
+      }
+    }
+    async function loadSourceVersions(preferred) {
+      var token = ++sourceOptionsToken;
+      var loader = $("source-loader").value;
+      var select = $("source-mc");
+      select.disabled = true;
+      select.innerHTML = "<option>\u6B63\u5728\u8BFB\u53D6\u7248\u672C\u2026</option>";
+      try {
+        var data = await api("/api/versions/" + loader);
+        if (token !== sourceOptionsToken) return;
+        select.innerHTML = "";
+        (data.versions || []).forEach(function(version) {
+          var option = document.createElement("option");
+          option.value = version;
+          option.textContent = version;
+          select.appendChild(option);
+        });
+        if (preferred && (data.versions || []).includes(preferred)) select.value = preferred;
+        setText("source-scope-note", "\u5355\u7248\u672C\u5B8C\u6210\u540E\u81EA\u52A8\u6253\u5F00\u6E90\u7801\u6587\u4EF6\u5939\uFF1B\u5168\u90E8\u7248\u672C\u5C06\u987A\u5E8F\u5904\u7406 " + (data.versions?.length || 0) + " \u4E2A\u7248\u672C\uFF0C\u5B8C\u6210\u540E\u53EA\u6253\u5F00\u6E90\u7801\u4ED3\u5E93\u3002");
+        await loadSourceMappings();
+      } catch (e) {
+        select.innerHTML = "<option>\u7248\u672C\u5217\u8868\u8BFB\u53D6\u5931\u8D25</option>";
+      } finally {
+        select.disabled = sourceStatusCache?.task?.state === "running";
+      }
+    }
+    async function startSourceTask(scope) {
+      var loader = $("source-loader").value;
+      var mcVersion = $("source-mc").value;
+      var mapping = $("source-mapping").value;
+      if (scope === "all") {
+        var countText = $("source-scope-note")?.textContent || "";
+        if (!await confirmAction({
+          title: "\u83B7\u53D6\u5168\u90E8\u7248\u672C\u6E90\u7801",
+          message: "\u5C06\u4F9D\u6B21\u751F\u6210 " + (LOADER_LABELS[loader] || loader) + " \u652F\u6301\u7684\u5168\u90E8 Minecraft \u7248\u672C\u6E90\u7801\u3002",
+          detail: countText + "\n\u4EFB\u52A1\u53EF\u968F\u65F6\u53D6\u6D88\uFF1B\u5DF2\u7ECF\u6709 READY \u6807\u8BB0\u7684\u7248\u672C\u9ED8\u8BA4\u4E0D\u4F1A\u91CD\u590D\u751F\u6210\u3002",
+          confirmLabel: "\u5F00\u59CB\u83B7\u53D6"
+        })) return;
+      }
+      hideError();
+      try {
+        var startedTask = await api("/api/sources/start", {
+          method: "POST",
+          body: {
+            scope,
+            loader,
+            mcVersion: scope === "single" ? mcVersion : void 0,
+            mapping: scope === "single" ? mapping : void 0,
+            force: $("source-force").checked,
+            mirror: true
+          }
+        });
+        sourceAutoOpenTask = startedTask?.task?.id ? { id: startedTask.task.id, scope } : null;
+        notify(scope === "single" ? "\u6E90\u7801\u4EFB\u52A1\u5DF2\u5F00\u59CB" : "\u5168\u90E8\u7248\u672C\u6E90\u7801\u4EFB\u52A1\u5DF2\u5F00\u59CB");
+        await loadSourceStatus();
+      } catch (e) {
+        showError("\u65E0\u6CD5\u542F\u52A8\u6E90\u7801\u4EFB\u52A1\uFF1A" + e.message);
+      }
+    }
+    async function copySourcePath(inputId) {
+      var value = $(inputId)?.value;
+      if (!value) return;
+      try {
+        await navigator.clipboard.writeText(value);
+        notify("\u8DEF\u5F84\u5DF2\u590D\u5236");
+      } catch {
+        showError("\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u624B\u52A8\u9009\u62E9\u8DEF\u5F84\u6587\u672C");
+      }
+    }
+    async function openSourcePath(inputId) {
+      var value = $(inputId)?.value;
+      if (!value) return;
+      await api("/api/open-folder", { method: "POST", body: { path: value } });
+    }
     async function refreshAllMetaFromSettings() {
       var btn = $("btn-settings-refresh-versions");
       if (btn) btn.disabled = true;
@@ -1989,7 +2486,7 @@
       });
       renderScanDirList("scan-dirs-list", extra, data.projectsRoot);
       renderConcurrencySettings(data.concurrency);
-      await loadMetaCacheStatus();
+      await Promise.all([loadMetaCacheStatus(), loadSourceStatus()]);
     }
     function renderConcurrencySettings(payload) {
       if (!payload) return;
@@ -2167,6 +2664,16 @@
     $("modal-close").addEventListener("click", function() {
       closeModal();
     });
+    $("modal-source-cancel")?.addEventListener("click", async function() {
+      var button = $("modal-source-cancel");
+      button.disabled = true;
+      try {
+        await api("/api/sources/cancel", { method: "POST" });
+        notify("\u6B63\u5728\u53D6\u6D88\u6E90\u7801\u51C6\u5907\u2026", "warning");
+      } finally {
+        button.disabled = false;
+      }
+    });
     $("modal-overlay")?.addEventListener("click", function(event) {
       if (event.target === $("modal-overlay")) closeModal();
     });
@@ -2335,7 +2842,29 @@
       notify("\u76EE\u5F55\u5DF2\u5BFC\u51FA\u5230\uFF1A" + data.path);
     });
     var buildAllPendingMod = null;
+    var buildAllPendingMatrix = null;
     var buildAllReturnFocus = null;
+    var buildAllBusy = false;
+    function setBuildAllBusy(busy, message) {
+      buildAllBusy = busy;
+      var confirmBtn = $("build-all-confirm");
+      var cancelBtn = $("build-all-cancel");
+      var options = $("build-all-modal")?.querySelector(".build-all-options");
+      if (confirmBtn) {
+        confirmBtn.disabled = busy;
+        confirmBtn.textContent = busy ? "\u5904\u7406\u4E2D\u2026" : "\u5F00\u59CB\u6784\u5EFA";
+      }
+      if (cancelBtn) cancelBtn.disabled = busy;
+      if (options) {
+        options.querySelectorAll("input, select").forEach(function(el) {
+          el.disabled = busy;
+        });
+      }
+      if (busy && message) {
+        var summary = $("build-all-summary");
+        if (summary) summary.textContent = message;
+      }
+    }
     function filterVariantsForBuildAll(mod, opts) {
       return (mod.variants || []).filter(function(v) {
         if (opts.loader && v.loader !== opts.loader) return false;
@@ -2343,21 +2872,57 @@
         return true;
       });
     }
-    function openBuildAllModal(mod) {
+    function isMatrixLoaderMcSupported(matrix, loader, mcVersion) {
+      if (!matrix || !matrix.supported) return false;
+      var list = matrix.supported[loader];
+      if (!list) return false;
+      if (Array.isArray(list)) return list.indexOf(mcVersion) >= 0;
+      return false;
+    }
+    function collectBuildAllTargets(mod, matrix, opts) {
+      var existing = filterVariantsForBuildAll(mod, opts);
+      var pending = [];
+      if (opts.includeMissingLoaders === false || !matrix) {
+        return { existing, pending };
+      }
+      var mcVersions = {};
+      (mod.variants || []).forEach(function(v) {
+        mcVersions[v.mcVersion] = true;
+      });
+      ["forge", "neoforge"].forEach(function(loader) {
+        if (opts.loader && loader !== opts.loader) return;
+        Object.keys(mcVersions).forEach(function(mcVersion) {
+          var exists = (mod.variants || []).some(function(v) {
+            return v.loader === loader && v.mcVersion === mcVersion;
+          });
+          if (exists) return;
+          if (!isMatrixLoaderMcSupported(matrix, loader, mcVersion)) return;
+          pending.push({ loader, mcVersion });
+        });
+      });
+      return { existing, pending };
+    }
+    function openBuildAllModal(mod, matrix) {
       buildAllReturnFocus = document.activeElement;
       buildAllPendingMod = mod;
+      buildAllPendingMatrix = matrix || null;
       var failedOnlyEl = $("build-all-failed-only");
       var loaderEl = $("build-all-loader");
+      var includeMissingEl = $("build-all-include-missing");
       if (failedOnlyEl) failedOnlyEl.checked = false;
       if (loaderEl) loaderEl.value = "";
+      if (includeMissingEl) includeMissingEl.checked = true;
       refreshBuildAllModalList();
       $("build-all-modal")?.classList.add("visible");
       requestAnimationFrame(function() {
         $("build-all-failed-only")?.focus();
       });
     }
-    function closeBuildAllModal() {
+    function closeBuildAllModal(force) {
+      if (buildAllBusy && !force) return;
       buildAllPendingMod = null;
+      buildAllPendingMatrix = null;
+      setBuildAllBusy(false);
       $("build-all-modal")?.classList.remove("visible");
       buildAllReturnFocus?.focus();
       buildAllReturnFocus = null;
@@ -2366,15 +2931,20 @@
       if (!buildAllPendingMod) return;
       var failedOnlyEl = $("build-all-failed-only");
       var loaderEl = $("build-all-loader");
+      var includeMissingEl = $("build-all-include-missing");
       var opts = {
         failedOnly: !!(failedOnlyEl && failedOnlyEl.checked),
-        loader: loaderEl ? loaderEl.value : ""
+        loader: loaderEl ? loaderEl.value : "",
+        includeMissingLoaders: !(includeMissingEl && !includeMissingEl.checked)
       };
-      var variants = filterVariantsForBuildAll(buildAllPendingMod, opts);
+      var targets = collectBuildAllTargets(buildAllPendingMod, buildAllPendingMatrix, opts);
+      var variants = targets.existing;
+      var pending = targets.pending;
+      var totalCount = variants.length + pending.length;
       var summary = $("build-all-summary");
       var list = $("build-all-list");
       if (summary) {
-        summary.textContent = variants.length ? "\u5C06\u4E3A\u300C" + buildAllPendingMod.displayName + "\u300D\u6784\u5EFA " + variants.length + " \u4E2A\u53D8\u4F53\uFF08\u6309 CPU \u6838\u6570\u5E76\u884C\uFF09\uFF1A" : "\u5F53\u524D\u7B5B\u9009\u6761\u4EF6\u4E0B\u6CA1\u6709\u53EF\u6784\u5EFA\u7684\u53D8\u4F53\u3002";
+        summary.textContent = totalCount ? "\u5C06\u4E3A\u300C" + buildAllPendingMod.displayName + "\u300D\u6784\u5EFA " + totalCount + " \u4E2A\u53D8\u4F53\uFF08\u6309 CPU \u6838\u6570\u5E76\u884C\uFF09\uFF1A" : "\u5F53\u524D\u7B5B\u9009\u6761\u4EF6\u4E0B\u6CA1\u6709\u53EF\u6784\u5EFA\u7684\u53D8\u4F53\u3002";
       }
       if (list) {
         list.innerHTML = "";
@@ -2383,65 +2953,113 @@
           li.textContent = (LOADER_LABELS[v.loader] || v.loader) + " " + v.mcVersion;
           list.appendChild(li);
         });
+        pending.forEach(function(p) {
+          var li = document.createElement("li");
+          li.textContent = (LOADER_LABELS[p.loader] || p.loader) + " " + p.mcVersion + "\uFF08\u5C06\u5148\u751F\u6210\uFF09";
+          list.appendChild(li);
+        });
       }
       var confirmBtn = $("build-all-confirm");
-      if (confirmBtn) confirmBtn.disabled = variants.length === 0;
+      if (confirmBtn) confirmBtn.disabled = totalCount === 0;
     }
     async function confirmBuildAll() {
-      if (!buildAllPendingMod || !state.currentModId) return;
+      if (buildAllBusy) return;
+      if (!buildAllPendingMod) {
+        notify("\u65E0\u6CD5\u5F00\u59CB\u6784\u5EFA\uFF1A\u8BF7\u5148\u6253\u5F00\u6A21\u7EC4\u8BE6\u60C5", "warning");
+        return;
+      }
+      var modId = String(buildAllPendingMod.id || "");
+      if (!modId) {
+        notify("\u65E0\u6CD5\u5F00\u59CB\u6784\u5EFA\uFF1A\u6A21\u7EC4\u4FE1\u606F\u65E0\u6548", "warning");
+        return;
+      }
       var modName = String(buildAllPendingMod.displayName || "\u6A21\u7EC4");
       var failedOnlyEl = $("build-all-failed-only");
       var loaderEl = $("build-all-loader");
-      var body = { runClient: false };
-      if (failedOnlyEl && failedOnlyEl.checked) body.failedOnly = true;
-      if (loaderEl && loaderEl.value) body.loader = loaderEl.value;
+      var includeMissingEl = $("build-all-include-missing");
+      var includeMissingLoaders = !(includeMissingEl && !includeMissingEl.checked);
+      var filterOpts = {
+        failedOnly: !!(failedOnlyEl && failedOnlyEl.checked),
+        loader: loaderEl ? loaderEl.value : "",
+        includeMissingLoaders
+      };
+      var targets = collectBuildAllTargets(buildAllPendingMod, buildAllPendingMatrix, filterOpts);
+      var mod = buildAllPendingMod;
+      var genErrors = [];
       hideError();
+      setBuildAllBusy(true, "\u51C6\u5907\u4E2D\u2026");
       try {
-        var result = await api("/api/mods/" + state.currentModId + "/build-all", {
+        if (includeMissingLoaders && targets.pending.length) {
+          for (var i = 0; i < targets.pending.length; i++) {
+            var pending = targets.pending[i];
+            setBuildAllBusy(
+              true,
+              "\u6B63\u5728\u751F\u6210 " + (LOADER_LABELS[pending.loader] || pending.loader) + " " + pending.mcVersion + "\uFF08" + (i + 1) + "/" + targets.pending.length + "\uFF09\u2026"
+            );
+            try {
+              await generateVariantQuiet(mod, pending.loader, pending.mcVersion);
+              var detailData = await api("/api/mods/" + modId + "/detail");
+              mod = detailData.mod;
+              buildAllPendingMod = mod;
+              buildAllPendingMatrix = detailData.matrix;
+            } catch (genErr) {
+              genErrors.push(
+                (LOADER_LABELS[pending.loader] || pending.loader) + " " + pending.mcVersion + "\uFF1A" + (genErr.message || String(genErr))
+              );
+            }
+          }
+        }
+        setBuildAllBusy(true, "\u6B63\u5728\u52A0\u5165\u6784\u5EFA\u961F\u5217\u2026");
+        var body = { runClient: false };
+        if (filterOpts.failedOnly) body.failedOnly = true;
+        if (filterOpts.loader) body.loader = filterOpts.loader;
+        var result = await api("/api/mods/" + modId + "/build-all", {
           method: "POST",
           body
         });
-        closeBuildAllModal();
+        closeBuildAllModal(true);
         if (result.jobIds && result.jobIds.length) {
           state.buildBatch = {
-            modId: state.currentModId,
+            modId,
             modName,
             jobIds: result.jobIds,
             done: {}
           };
         }
         updateQueueBar();
-        invalidateDetailCache(state.currentModId);
+        invalidateDetailCache(modId);
         await refreshDetail({ force: true });
         var skipped = result.skipped || {};
         var extra = [];
         if (skipped.queued) extra.push(skipped.queued + " \u4E2A\u5DF2\u5728\u961F\u5217");
         if (skipped.missing) extra.push(skipped.missing + " \u4E2A\u8DEF\u5F84\u4E0D\u5B58\u5728");
         var suffix = extra.length ? "\uFF08\u8DF3\u8FC7 " + extra.join("\uFF0C") + "\uFF09" : "";
-        notify(result.count + " \u4E2A\u53D8\u4F53\u5DF2\u52A0\u5165\u6784\u5EFA\u961F\u5217" + suffix);
+        if (genErrors.length) {
+          notify("\u90E8\u5206\u53D8\u4F53\u751F\u6210\u5931\u8D25\uFF08" + genErrors.length + " \u4E2A\uFF09\uFF0C\u5176\u4F59\u5DF2\u5904\u7406", "warning");
+        }
+        notify((result.count || 0) + " \u4E2A\u53D8\u4F53\u5DF2\u52A0\u5165\u6784\u5EFA\u961F\u5217" + suffix);
       } catch (e) {
-        showError("\u6784\u5EFA\u5168\u90E8\u5931\u8D25\uFF1A" + e.message);
+        var msg = e instanceof Error ? e.message : String(e);
+        notify("\u6784\u5EFA\u5168\u90E8\u5931\u8D25\uFF1A" + msg, "error");
+        var summary = $("build-all-summary");
+        if (summary) summary.textContent = "\u5931\u8D25\uFF1A" + msg;
+        setBuildAllBusy(false);
+        refreshBuildAllModalList();
       }
     }
     $("btn-build-all").addEventListener("click", async function() {
       if (!state.currentModId) return;
-      var mod = state.detailCache[state.currentModId]?.mod || state.mods.find(function(m) {
-        return m.id === state.currentModId;
-      });
-      if (!mod) {
-        try {
-          var data = await api("/api/mods/" + state.currentModId);
-          mod = data.mod;
-        } catch (e) {
-          showError("\u52A0\u8F7D\u6A21\u7EC4\u4FE1\u606F\u5931\u8D25\uFF1A" + e.message);
+      hideError();
+      try {
+        var detailData = await api("/api/mods/" + state.currentModId + "/detail");
+        if (!detailData.mod || !detailData.mod.variants || !detailData.mod.variants.length) {
+          notify("\u6682\u65E0\u53D8\u4F53\u53EF\u6784\u5EFA");
           return;
         }
+        openBuildAllModal(detailData.mod, detailData.matrix);
+      } catch (e) {
+        showError("\u52A0\u8F7D\u6A21\u7EC4\u4FE1\u606F\u5931\u8D25\uFF1A" + e.message);
       }
-      if (!mod.variants || !mod.variants.length) {
-        notify("\u6682\u65E0\u53D8\u4F53\u53EF\u6784\u5EFA");
-        return;
-      }
-      openBuildAllModal(mod);
     });
     $("build-all-cancel")?.addEventListener("click", closeBuildAllModal);
     $("build-all-confirm")?.addEventListener("click", function() {
@@ -2449,6 +3067,7 @@
     });
     $("build-all-failed-only")?.addEventListener("change", refreshBuildAllModalList);
     $("build-all-loader")?.addEventListener("change", refreshBuildAllModalList);
+    $("build-all-include-missing")?.addEventListener("change", refreshBuildAllModalList);
     $("build-all-modal")?.addEventListener("click", function(e) {
       if (e.target === $("build-all-modal")) closeBuildAllModal();
     });
@@ -2547,6 +3166,40 @@
     });
     $("btn-settings-refresh-mappings")?.addEventListener("click", function() {
       void refreshAllMappingsFromSettings();
+    });
+    $("source-loader")?.addEventListener("change", function() {
+      void loadSourceVersions();
+    });
+    $("source-mc")?.addEventListener("change", function() {
+      void loadSourceMappings();
+    });
+    $("source-mapping")?.addEventListener("change", renderSelectedSourcePath);
+    $("btn-source-current")?.addEventListener("click", function() {
+      void startSourceTask("single");
+    });
+    $("btn-source-all")?.addEventListener("click", function() {
+      void startSourceTask("all");
+    });
+    $("btn-source-cancel")?.addEventListener("click", async function() {
+      try {
+        await api("/api/sources/cancel", { method: "POST" });
+        notify("\u6B63\u5728\u53D6\u6D88\u6E90\u7801\u4EFB\u52A1\u2026", "warning");
+        await loadSourceStatus();
+      } catch (e) {
+        showError("\u53D6\u6D88\u6E90\u7801\u4EFB\u52A1\u5931\u8D25\uFF1A" + e.message);
+      }
+    });
+    $("btn-source-open-root")?.addEventListener("click", function() {
+      void openSourcePath("source-root-path");
+    });
+    $("btn-source-copy-root")?.addEventListener("click", function() {
+      void copySourcePath("source-root-path");
+    });
+    $("btn-source-open-selected")?.addEventListener("click", function() {
+      void openSourcePath("source-selected-path");
+    });
+    $("btn-source-copy-selected")?.addEventListener("click", function() {
+      void copySourcePath("source-selected-path");
     });
     initCreateWizard();
     loadMods();

@@ -60,10 +60,16 @@ function readModsToml(dir: string, file: string): { id?: string; name?: string; 
   return { id: modId, name, version };
 }
 
-function detectMappings(loader: LoaderId, props: Record<string, string>): MappingsId {
+function detectMappings(loader: LoaderId, props: Record<string, string>, buildGradle = ""): MappingsId {
   const variant = props.mappings_variant ?? props.mappings_channel ?? "";
   if (variant.includes("parchment") || props.parchment_mappings_version) return "parchment";
   if (props.yarn_mappings) return "yarn";
+  if (loader === "forge" && (variant.includes("snapshot") || variant.includes("stable"))) return "mcp";
+  if (loader === "forge") {
+    const channel = /\bmappings\s+channel\s*:\s*['"]([^'"]+)['"]/.exec(buildGradle)?.[1]?.toLowerCase();
+    if (channel === "snapshot" || channel === "stable") return "mcp";
+    if (/\bmappings\s*=\s*['"](?:snapshot|stable)[^'"]*['"]/.test(buildGradle)) return "mcp";
+  }
   if (loader === "fabric") return "yarn";
   return "mojmap";
 }
@@ -75,12 +81,13 @@ export function detectProject(projectPath: string): DetectedProject | null {
   if (!isModProject(resolved)) return null;
 
   const props = readProps(path.join(resolved, "gradle.properties"));
+  const buildGradlePath = path.join(resolved, "build.gradle");
+  const buildGradle = fs.existsSync(buildGradlePath) ? fs.readFileSync(buildGradlePath, "utf8") : "";
   const loader = detectLoader(resolved, props);
   if (!loader) return null;
 
   let mcVersion = props.minecraft_version ?? "";
   if (!mcVersion && loader === "forge") {
-    const buildGradle = fs.readFileSync(path.join(resolved, "build.gradle"), "utf8");
     const m = buildGradle.match(/minecraft\s*\{\s*version\s*=\s*['"]([^'"]+)['"]/);
     if (m) mcVersion = m[1];
   }
@@ -104,7 +111,7 @@ export function detectProject(projectPath: string): DetectedProject | null {
     displayName,
     modVersion,
     group,
-    mappings: detectMappings(loader, props),
+    mappings: detectMappings(loader, props, buildGradle),
     projectPath: resolved,
   };
 }

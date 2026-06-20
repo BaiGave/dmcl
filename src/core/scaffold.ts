@@ -7,6 +7,7 @@ import { scaffoldNeoForge } from "../loaders/neoforge.js";
 import { applyChinaMirror } from "./mirror.js";
 import { injectBuildscriptMirrors, injectMavenMirrors } from "./maven.js";
 import { writeCursorConfig } from "./vscode.js";
+import { applySideLayout } from "./side-layout.js";
 
 export function pascalCase(input: string): string {
   const name = input
@@ -24,6 +25,8 @@ export async function scaffoldProject(opts: ProjectOptions, log: Logger): Promis
   if (opts.loader === "fabric") await scaffoldFabric(opts, log);
   else if (opts.loader === "forge") await scaffoldForge(opts, log);
   else await scaffoldNeoForge(opts, log);
+
+  await applySideLayout(opts, log);
 
   if (opts.mirror) {
     await applyChinaMirror(opts.targetDir, log);

@@ -203,6 +203,79 @@ dependencies {
   });
 });
 
+describe("side layout helpers", () => {
+  it("defaults to unified for all loaders", async () => {
+    const { defaultSideLayout, effectiveSideLayout, parseSideLayout, wantsSplitSources } = await import("../src/core/side-layout.js");
+    assert.equal(defaultSideLayout("fabric", "1.21.4"), "unified");
+    assert.equal(defaultSideLayout("fabric", "1.17.1"), "unified");
+    assert.equal(defaultSideLayout("forge", "1.21.4"), "unified");
+    assert.equal(parseSideLayout("client"), "client");
+    assert.equal(parseSideLayout("bogus"), null);
+
+    const base = {
+      loader: "fabric" as const,
+      mcVersion: "1.21.4",
+      modId: "test",
+      displayName: "Test",
+      className: "Test",
+      group: "com.test",
+      targetDir: "/tmp/test",
+      mirror: false,
+      mappings: "yarn" as const,
+    };
+    assert.equal(effectiveSideLayout({ ...base, sideLayout: "split" }), "split");
+    assert.equal(effectiveSideLayout({ ...base, mcVersion: "1.17.1", sideLayout: "split" }), "unified");
+    assert.equal(wantsSplitSources({ ...base, sideLayout: "split" }), true);
+    assert.equal(wantsSplitSources({ ...base, sideLayout: "unified" }), false);
+    assert.equal(wantsSplitSources({ ...base, sideLayout: "client" }), true);
+    assert.equal(wantsSplitSources({ ...base, sideLayout: "server" }), false);
+  });
+
+  it("removes demo mixins and syncs mixin config for unified fabric layout", async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const { applySideLayout } = await import("../src/core/side-layout.js");
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dmcl-side-"));
+    const res = path.join(dir, "src", "main", "resources");
+    const java = path.join(dir, "src", "main", "java", "com", "example", "aaa", "mixin");
+    fs.mkdirSync(res, { recursive: true });
+    fs.mkdirSync(java, { recursive: true });
+    fs.writeFileSync(path.join(java, "ExampleMixin.java"), "package com.example.aaa.mixin;\n");
+    fs.writeFileSync(path.join(res, "aaa.mixins.json"), JSON.stringify({
+      required: true,
+      package: "com.example.aaa.mixin",
+      compatibilityLevel: "JAVA_21",
+      mixins: ["ExampleMixin"],
+    }, null, "\t") + "\n");
+    fs.writeFileSync(path.join(res, "fabric.mod.json"), JSON.stringify({
+      schemaVersion: 1,
+      id: "aaa",
+      mixins: ["aaa.mixins.json"],
+    }, null, "\t") + "\n");
+
+    await applySideLayout({
+      loader: "fabric",
+      mcVersion: "1.21.4",
+      modId: "aaa",
+      displayName: "Aaa",
+      className: "Aaa",
+      group: "com.example.aaa",
+      targetDir: dir,
+      mirror: false,
+      mappings: "yarn",
+      sideLayout: "unified",
+    }, () => {});
+
+    assert.equal(fs.existsSync(path.join(java, "ExampleMixin.java")), false);
+    assert.equal(fs.existsSync(path.join(res, "aaa.mixins.json")), false);
+    const modJson = JSON.parse(fs.readFileSync(path.join(res, "fabric.mod.json"), "utf8")) as { mixins?: unknown[] };
+    assert.equal(modJson.mixins, undefined);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 describe("resolveMappings for unobfuscated fabric", () => {
   it("returns implicit mojmap for 26.x", async () => {
     const { resolveMappings } = await import("../src/meta/mappings-cache.js");

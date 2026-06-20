@@ -43,6 +43,9 @@ export function getLogsDir(): string {
 export class WorkspaceStore {
   private data: WorkspaceData;
   private modsCache: ManagedMod[] = [];
+  private lastRefreshAt = 0;
+  /** 短时间内的重复 refresh 合并为一次磁盘扫描 */
+  static readonly REFRESH_DEBOUNCE_MS = 3_000;
 
   constructor() {
     this.data = this.load();
@@ -89,7 +92,12 @@ export class WorkspaceStore {
     );
   }
 
-  refresh(): ManagedMod[] {
+  refresh(opts?: { force?: boolean }): ManagedMod[] {
+    const now = Date.now();
+    if (!opts?.force && now - this.lastRefreshAt < WorkspaceStore.REFRESH_DEBOUNCE_MS) {
+      return this.modsCache;
+    }
+    this.lastRefreshAt = now;
     this.modsCache = syncWorkspaceFromDisk(this);
     return this.modsCache;
   }
@@ -121,7 +129,7 @@ export class WorkspaceStore {
   setScanDirs(dirs: string[]): void {
     this.data.scanDirs = dirs;
     this.save();
-    this.refresh();
+    this.refresh({ force: true });
   }
 
   addScanDir(dir: string): void {
@@ -129,7 +137,7 @@ export class WorkspaceStore {
     if (!this.data.scanDirs.includes(resolved)) {
       this.data.scanDirs.push(resolved);
       this.save();
-      this.refresh();
+      this.refresh({ force: true });
     }
   }
 
@@ -139,7 +147,7 @@ export class WorkspaceStore {
     if (idx < 0) return false;
     this.data.scanDirs.splice(idx, 1);
     this.save();
-    this.refresh();
+    this.refresh({ force: true });
     return true;
   }
 
@@ -158,7 +166,7 @@ export class WorkspaceStore {
     if (!this.data.excludedPaths.some((p) => normalizePath(p) === key)) {
       this.data.excludedPaths.push(resolved);
       this.save();
-      this.refresh();
+      this.refresh({ force: true });
     }
   }
 
@@ -168,7 +176,7 @@ export class WorkspaceStore {
     if (idx < 0) return false;
     this.data.excludedPaths.splice(idx, 1);
     this.save();
-    this.refresh();
+    this.refresh({ force: true });
     return true;
   }
 
@@ -206,7 +214,7 @@ export class WorkspaceStore {
       updatedAt: now,
     };
     writeModMeta(input.modDir, meta);
-    this.refresh();
+    this.refresh({ force: true });
     return this.getMod(meta.id) ?? {
       id: meta.id,
       modId: input.modId,
@@ -239,7 +247,7 @@ export class WorkspaceStore {
     writeVariantMeta(variant.projectPath, meta);
     ensureModMeta(inferModDir(variant.projectPath, mod.modId), mod.modId, mod.displayName);
 
-    this.refresh();
+    this.refresh({ force: true });
     const found = this.getVariant(meta.id);
     if (found) return found.variant;
 
@@ -263,7 +271,7 @@ export class WorkspaceStore {
       meta.lastBuiltAt = new Date().toISOString();
     }
     writeVariantMeta(found.variant.projectPath, meta);
-    this.refresh();
+    this.refresh({ force: true });
     invalidateMatrixCache(found.mod.id);
   }
 
@@ -282,7 +290,7 @@ export class WorkspaceStore {
     if (patch.status !== undefined) meta.status = patch.status;
     meta.updatedAt = new Date().toISOString();
     writeModMeta(modDir, meta);
-    this.refresh();
+    this.refresh({ force: true });
     return this.getMod(id);
   }
 
@@ -296,7 +304,7 @@ export class WorkspaceStore {
     const modDir = mod.variants[0] ? inferModDir(mod.variants[0].projectPath, mod.modId) : null;
     if (modDir) deleteModMeta(modDir);
     invalidateMatrixCache(id);
-    this.refresh();
+    this.refresh({ force: true });
     return true;
   }
 
@@ -313,7 +321,7 @@ export class WorkspaceStore {
       writeModMeta(modDir, modMeta);
     }
     invalidateMatrixCache(found.mod.id);
-    this.refresh();
+    this.refresh({ force: true });
     return true;
   }
 
@@ -326,7 +334,7 @@ export class WorkspaceStore {
       return false;
     });
     if (removed > 0) this.save();
-    this.refresh();
+    this.refresh({ force: true });
     return removed;
   }
 
@@ -341,7 +349,7 @@ export class WorkspaceStore {
       ensureVariantMeta(projectPath, found.variant.source);
     }
     this.removeExcludedPath(projectPath);
-    this.refresh();
+    this.refresh({ force: true });
   }
 
   setVariantPathMissing(_variantId: string, _missing: boolean): void {

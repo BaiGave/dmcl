@@ -43,6 +43,9 @@ export interface GradleRunOptions {
   tasks?: string[];
   isCancelled?: () => boolean;
   onProc?: (proc: ChildProcess, isWin: boolean) => void;
+  env?: NodeJS.ProcessEnv;
+  /** Terminate Gradle and return exit code 124 after this many milliseconds. */
+  timeoutMs?: number;
 }
 
 export interface GradleClientOptions extends GradleRunOptions {
@@ -95,6 +98,7 @@ export async function ensureGradlewExecutable(targetDir: string): Promise<void> 
 export function gradleSpawn(
   targetDir: string,
   tasks: string[],
+  envOverrides?: NodeJS.ProcessEnv,
 ): { proc: ChildProcess; isWin: boolean } {
   const isWin = process.platform === "win32";
   const cmd = isWin
@@ -103,7 +107,7 @@ export function gradleSpawn(
   const cmdArgs = isWin ? ["/c", "gradlew.bat", ...tasks] : tasks;
   const proc = spawn(cmd, cmdArgs, {
     cwd: targetDir,
-    env: buildGradleEnv(targetDir),
+    env: { ...buildGradleEnv(targetDir), ...envOverrides },
     stdio: ["ignore", "pipe", "pipe"],
   });
   return { proc, isWin };
@@ -187,12 +191,26 @@ export async function runGradleTask(
   await ensureGradlewExecutable(targetDir);
   if (cancelledCode(opts) !== null) return 1;
 
-  const { proc, isWin } = gradleSpawn(targetDir, tasks);
+  const { proc, isWin } = gradleSpawn(targetDir, tasks, opts?.env);
   opts?.onProc?.(proc, isWin);
   attachLineStream(proc, onLine);
 
   return new Promise((resolve) => {
-    const done = (code: number) => resolve(code);
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    const done = (code: number) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(code);
+    };
+    if (opts?.timeoutMs && opts.timeoutMs > 0) {
+      timer = setTimeout(() => {
+        killProcessTree(proc, isWin);
+        done(124);
+      }, opts.timeoutMs);
+      timer.unref?.();
+    }
     proc.on("close", (code) => {
       if (opts?.isCancelled?.()) {
         done(1);

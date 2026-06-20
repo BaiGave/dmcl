@@ -44,9 +44,22 @@ const node_path_1 = __importDefault(require("node:path"));
 const gradle_1 = require("./gradle");
 const gradle_runner_1 = require("./gradle-runner");
 const workspace_api_1 = require("./workspace-api");
+const dist_loader_1 = require("./dist-loader");
 const build_queue_1 = require("./build-queue");
+const APP_DISPLAY_NAME = "DMCL";
+const APP_USER_MODEL_ID = "com.dmcl.workbench";
+if (process.platform === "win32") {
+    electron_1.app.setAppUserModelId(APP_USER_MODEL_ID);
+}
+electron_1.app.setName(APP_DISPLAY_NAME);
 const PORT = 19089;
 let mainWindow = null;
+async function packagedProjectsRoot() {
+    if (!electron_1.app.isPackaged)
+        return undefined;
+    const { resolveDmclHome } = await (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("core", "dmcl-home.js"));
+    return node_path_1.default.join(resolveDmclHome({ execPath: process.execPath }), "projects");
+}
 const generateSessions = new Set();
 let notificationBatch = { success: 0, failed: 0, labels: [], targetVariantId: null, failedVariantIds: [] };
 let notificationBatchCancelled = false;
@@ -70,6 +83,7 @@ function killActiveChild() {
     cancelAllGenerateSessions();
     void (0, gradle_runner_1.cancelAllRunners)();
     (0, build_queue_1.cancelBuildQueue)();
+    void (0, workspace_api_1.cancelSourceJobs)();
 }
 function parseGenerateArgs(args) {
     const out = {};
@@ -440,7 +454,7 @@ function createWindow() {
         title: "DMCL",
         show: false,
         backgroundColor: "#f6f8f6",
-        icon: node_path_1.default.join(__dirname, "assets", "brand", "dmcl-app-icon-256.png"),
+        icon: node_path_1.default.join(__dirname, "assets", "brand", process.platform === "win32" ? "dmcl-app-icon.ico" : "dmcl-app-icon-256.png"),
         autoHideMenuBar: true,
         webPreferences: {
             preload: node_path_1.default.join(__dirname, "preload-bridge.js"),
@@ -457,12 +471,15 @@ function createWindow() {
     });
 }
 electron_1.app.whenReady().then(() => {
-    if (process.platform === "win32")
-        electron_1.app.setAppUserModelId("com.dmcl.workbench");
     const repoRoot = node_path_1.default.resolve(__dirname, "..");
     (0, node_http_1.createServer)(serveGui).listen(PORT, "127.0.0.1", () => {
         console.log(`GUI server: http://localhost:${PORT}`);
-        (0, workspace_api_1.initWorkspace)(repoRoot).catch(console.warn);
+        void packagedProjectsRoot()
+            .then((projectsRoot) => (0, workspace_api_1.initWorkspace)(repoRoot, projectsRoot))
+            .catch(async (err) => {
+            console.warn("packagedProjectsRoot failed, falling back to dev layout:", err);
+            await (0, workspace_api_1.initWorkspace)(repoRoot, undefined);
+        });
         createWindow();
     });
 });

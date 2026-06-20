@@ -1,12 +1,23 @@
 import { state, pathRefreshTimer, setPathRefreshTimer } from "./state";
-import { LOADERS, LOADER_LABELS, STATUS_LABELS } from "./constants";
+import { LOADERS, LOADER_LABELS, STATUS_LABELS, SIDE_LAYOUT_HINTS, SIDE_LAYOUT_HOVER_TIPS, SIDE_LAYOUT_OPTIONS } from "./constants";
 import { $, showError, hideError, setText, notify, showView, esc, showModal, closeModal, confirmAction } from "./dom";
-import { hydrateIcons, icon } from "./icons";
+import { hydrateIcons, icon, loaderIcon } from "./icons";
 import { api } from "./api";
 
 export function bootWorkbench(): void {
 
   hydrateIcons();
+  initLoaderFilterChips();
+
+  function initLoaderFilterChips() {
+    document.querySelectorAll<HTMLElement>("[data-loader-filter]").forEach(function (chip) {
+      var loader = chip.dataset.loaderFilter;
+      if (!loader || loader === "all") return;
+      chip.classList.add("loader-" + loader);
+      var label = chip.textContent?.trim() || LOADER_LABELS[loader] || loader;
+      chip.innerHTML = loaderIcon(loader) + "<span>" + esc(label) + "</span>";
+    });
+  }
   var reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   if (!reduceMotion && !sessionStorage.getItem("dmcl:intro-played")) {
     sessionStorage.setItem("dmcl:intro-played", "1");
@@ -135,6 +146,11 @@ export function bootWorkbench(): void {
       var description = $("empty-description");
       var primary = $("empty-primary") as HTMLButtonElement | null;
       var secondary = $("empty-secondary") as HTMLButtonElement | null;
+      var illustration = $("empty-illustration") as HTMLImageElement | null;
+      var emptyIcon = $("empty-icon") as HTMLElement | null;
+      var showGenesis = !state.mods.length;
+      if (illustration) illustration.hidden = !showGenesis;
+      if (emptyIcon) emptyIcon.hidden = showGenesis;
       if (!state.mods.length) {
         if (title) title.textContent = "开始你的第一个模组";
         if (description) description.textContent = "从模板创建新项目，或导入已有 Gradle 模组。";
@@ -160,7 +176,7 @@ export function bootWorkbench(): void {
       card.className = "mod-card" + (state.currentModId === mod.id ? " selected" : "");
       var health = buildHealthData(mod);
       var variants = (mod.variants || []).slice(0, 3).map(function (v) {
-        return '<span class="variant-chip"><i class="loader-mark loader-' + esc(v.loader) + '">' + esc((LOADER_LABELS[v.loader] || v.loader).slice(0, 1)) + '</i>' + esc(LOADER_LABELS[v.loader] + " " + v.mcVersion) + '</span>';
+        return '<span class="variant-chip"><i class="loader-mark loader-' + esc(v.loader) + '">' + loaderIcon(v.loader) + '</i>' + esc(LOADER_LABELS[v.loader] + " " + v.mcVersion) + '</span>';
       }).join("");
       var remaining = Math.max(0, (mod.variants || []).length - 3);
       card.innerHTML =
@@ -316,7 +332,7 @@ export function bootWorkbench(): void {
     $("detail-meta").innerHTML = fromList
       ? '<span>modId: ' + esc(fromList.modId) + '</span><span>加载详情…</span>'
       : '<span>加载中…</span>';
-    renderMatrixLoading("加载版本矩阵…", "正在读取模组详情与支持范围");
+    renderMatrixLoading("加载版本矩阵…", "正在读取模组详情与支持矩阵");
     $("variant-list").innerHTML = '<p class="muted-placeholder inline-empty">加载变体列表…</p>';
   }
 
@@ -355,20 +371,16 @@ export function bootWorkbench(): void {
         setMatrixRefreshing(true);
         setMatrixLoadingMeta(true, "刷新中…");
       } else {
-        renderMatrixLoading("加载版本矩阵…", "正在查询 loader 与 Minecraft 版本组合");
+        renderMatrixLoading("加载版本矩阵…", "正在组装支持矩阵（优先使用本地元数据缓存）");
       }
     }
 
     try {
-      var modData = await api("/api/mods/" + modId);
+      var detailData = await api("/api/mods/" + modId + "/detail");
       if (requestId !== state.detailRequestId || modId !== state.currentModId) return;
 
-      if (showMatrixRefresh && !cached) {
-        renderMatrixLoading("加载版本矩阵…", "正在计算 " + modData.mod.modId + " 的支持矩阵");
-      }
-
-      var matrixData = await api("/api/mods/" + modId + "/matrix");
-      if (requestId !== state.detailRequestId || modId !== state.currentModId) return;
+      var modData = { mod: detailData.mod };
+      var matrixData = detailData.matrix;
 
       state.detailCache[modId] = {
         mod: modData.mod,
@@ -393,8 +405,6 @@ export function bootWorkbench(): void {
     if (status === "failed") return "失败";
     if (status === "building") return "构建中";
     if (status === "exists") return "已存在";
-    if (status === "verified") return "已验证";
-    if (status === "verification-failed") return "验证失败";
     if (status === "available") return "可创建";
     return "不支持";
   }
@@ -419,8 +429,8 @@ export function bootWorkbench(): void {
     matrix.loaders.forEach(function (ldr) {
       var tr = document.createElement("tr");
       var th = document.createElement("th");
-      th.className = "row-head";
-      th.textContent = ldr.label;
+      th.className = "row-head loader-row-head loader-" + ldr.id;
+      th.innerHTML = loaderIcon(ldr.id) + '<span>' + esc(ldr.label) + '</span>';
       tr.appendChild(th);
 
       matrix.versions.forEach(function (ver) {
@@ -431,8 +441,8 @@ export function bootWorkbench(): void {
         var status = cell ? cell.status : "unsupported";
         td.className = "cell-" + status;
         var matrixMatches = state.matrixFilter === "all"
-          || (state.matrixFilter === "available" && (status === "available" || status === "verified" || status === "verification-failed"))
-          || (state.matrixFilter === "failed" && (status === "failed" || status === "verification-failed"))
+          || (state.matrixFilter === "available" && status === "available")
+          || (state.matrixFilter === "failed" && status === "failed")
           || (state.matrixFilter === "existing" && (status === "built" || status === "exists" || status === "building"));
         if (!matrixMatches) td.classList.add("matrix-muted");
         var actionButton = document.createElement("button");
@@ -442,18 +452,12 @@ export function bootWorkbench(): void {
         actionButton.setAttribute("aria-label", ldr.label + " " + ver + "，" + cellLabel(status));
         actionButton.disabled = status === "unsupported" || status === "building";
         td.title = ldr.label + " " + ver + " — " + cellLabel(status);
-        if (cell && cell.verification && cell.verification.updatedAt) {
-          td.title += " / verified: " + cell.verification.state + " @ " + cell.verification.updatedAt;
-        }
-        if (cell && cell.verification && cell.verification.failureSummary) {
-          td.title += " / " + cell.verification.failureSummary;
-        }
 
         if (status === "built" || status === "failed" || status === "exists") {
           actionButton.addEventListener("click", function () {
             scrollToVariant(cell.variantId);
           });
-        } else if (status === "available" || status === "verified" || status === "verification-failed") {
+        } else if (status === "available") {
           actionButton.addEventListener("click", function () {
             generateVariantFromMatrix(mod, ldr.id, ver);
           });
@@ -490,8 +494,65 @@ export function bootWorkbench(): void {
     return mod.variants[0];
   }
 
+  function pickSourceVariantForMc(mod, mcVersion) {
+    return (mod.variants || []).find(function (v) { return v.mcVersion === mcVersion; }) || pickSourceVariant(mod);
+  }
+
+  async function consumeVariantGenerationStream(resp) {
+    if (!resp.ok) {
+      var errText = "";
+      try { errText = await resp.text(); } catch { /* ignore */ }
+      throw new Error(errText || "HTTP " + resp.status);
+    }
+    if (!resp.body) throw new Error("服务器未返回流式响应");
+
+    var reader = resp.body.getReader();
+    var decoder = new TextDecoder();
+    var buffer = "";
+    var exitCode = 0;
+    var lastErrorLine = "";
+
+    while (true) {
+      var chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
+      var lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      lines.forEach(function (line) {
+        if (!line.trim()) return;
+        if (line.indexOf("__EXIT__:") === 0) {
+          exitCode = parseInt(line.slice(9), 10);
+          return;
+        }
+        if (line.indexOf("__") === 0) return;
+        if (line.indexOf("错误：") === 0) lastErrorLine = line.slice(3);
+      });
+    }
+
+    if (exitCode !== 0 && lastErrorLine) throw new Error(lastErrorLine);
+    return exitCode;
+  }
+
+  async function generateVariantQuiet(mod, loader, mcVersion) {
+    var source = pickSourceVariantForMc(mod, mcVersion);
+    if (!source) throw new Error("没有可用的源变体");
+
+    var resp = await fetch("/api/mods/" + mod.id + "/variants", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sourceVariantId: source.id,
+        targetLoader: loader,
+        targetMc: mcVersion,
+        autoBuild: false,
+      }),
+    });
+    var exitCode = await consumeVariantGenerationStream(resp);
+    if (exitCode !== 0) throw new Error("生成失败（退出码 " + exitCode + "）");
+  }
+
   async function generateVariantFromMatrix(mod, loader, mc) {
-    var source = pickSourceVariant(mod);
+    var source = pickSourceVariantForMc(mod, mc);
     if (!source) {
       showError("请先有至少一个变体作为源码来源");
       return;
@@ -521,12 +582,12 @@ export function bootWorkbench(): void {
         }),
       });
 
-      var reader = resp.body.getReader();
+      var log = $("modal-log");
+      if (log) log.innerHTML = "";
+
+      var reader = resp.body!.getReader();
       var decoder = new TextDecoder();
       var buffer = "";
-      var log = $("modal-log");
-      log.innerHTML = "";
-
       var exitCode = 0;
       while (true) {
         var result = await reader.read();
@@ -541,11 +602,12 @@ export function bootWorkbench(): void {
             return;
           }
           if (line.indexOf("__") === 0) return;
+          if (!log) return;
           var div = document.createElement("div");
           div.textContent = line;
           log.appendChild(div);
         });
-        log.scrollTop = log.scrollHeight;
+        if (log) log.scrollTop = log.scrollHeight;
       }
 
       if (exitCode !== 0) throw new Error("生成失败（退出码 " + exitCode + "）");
@@ -579,23 +641,30 @@ export function bootWorkbench(): void {
         : v.buildStatus === "building" ? "任务进行中" : "未验证";
 
       var missingBtn = "";
+      var sourceReady = v.sourceStatus?.ready === true;
+      var sourceText = sourceReady
+        ? "开发源码已准备 · MC + " + (v.sourceStatus.modCount || 0) + " 个前置"
+        : "开发源码尚未准备";
 
       item.innerHTML =
         '<div class="variant-item-header">' +
-          '<span class="loader-badge loader-' + esc(v.loader) + '">' + esc((LOADER_LABELS[v.loader] || v.loader).slice(0, 2)) + '</span>' +
+          '<span class="loader-badge loader-' + esc(v.loader) + '">' + loaderIcon(v.loader) + '</span>' +
           '<div><h4>' + LOADER_LABELS[v.loader] + ' ' + esc(v.mcVersion) + ' <span>· v' + esc(v.modVersion) + '</span></h4>' +
           '<div class="path" title="' + esc(v.projectPath) + '">' + esc(v.projectPath) + '</div>' +
-          '<div class="variant-status"><span class="status-dot"></span>' + statusText + '</div></div>' +
+          '<div class="variant-status"><span class="status-dot"></span>' + statusText + '</div>' +
+          '<div class="variant-source-state' + (sourceReady ? ' ready' : '') + '">' + icon("sparkles") + esc(sourceText) + '</div></div>' +
         '</div>' +
         '<div class="variant-actions">' +
           '<button class="btn btn-primary btn-sm" data-action="build">' + icon("build") + '构建</button>' +
           '<button class="btn btn-secondary btn-sm" data-action="run">' + icon("play") + '启动</button>' +
           '<button class="btn btn-secondary btn-sm" data-action="logs">' + icon("terminal") + '日志</button>' +
+          '<button class="btn btn-secondary btn-sm btn-prepare-sources" data-action="sources">' + icon(sourceReady ? "folder" : "sparkles") + (sourceReady ? '打开开发源码' : '准备开发源码') + '</button>' +
           '<button class="btn btn-icon" data-action="folder" title="打开项目文件夹" aria-label="打开项目文件夹">' + icon("folder") + '</button>' +
           '<details class="action-menu"><summary class="btn btn-quiet btn-sm" aria-label="更多变体操作">' + icon("more") + '</summary>' +
             '<div class="action-menu-popover">' +
               '<button data-action="cursor">用 Cursor 打开</button>' +
               '<button data-action="relocate">重新定位项目</button>' + missingBtn +
+              (sourceReady ? '<button data-action="sources-refresh">重新准备开发源码</button>' : '') +
               '<span class="menu-separator"></span>' +
               '<button data-action="unlink">仅移除登记</button>' +
               '<button class="menu-danger" data-action="delete">删除变体</button>' +
@@ -614,6 +683,64 @@ export function bootWorkbench(): void {
     });
   }
 
+  async function prepareVariantSources(modId, variant, force) {
+    hideError();
+    showModal("准备开发源码", "正在识别 Minecraft、映射与 Gradle 前置依赖…");
+    var cancelButton = $("modal-source-cancel") as HTMLButtonElement | null;
+    if (cancelButton) cancelButton.hidden = false;
+    try {
+      var started = await api("/api/variants/" + variant.id + "/sources", {
+        method: "POST",
+        body: { force: force === true },
+      });
+      var taskId = started.task?.id;
+      if (!taskId) throw new Error("服务端未返回源码任务");
+      while (true) {
+        var status = await api("/api/sources/status");
+        var task = status.task;
+        if (!task || task.id !== taskId) throw new Error("源码任务状态已丢失");
+        var log = $("modal-log");
+        if (log) {
+          var dependencyProgress = task.currentPhase === "dependencies"
+            ? (task.dependenciesFound
+              ? " · 前置模组 " + (task.dependenciesPrepared || 0) + "/" + task.dependenciesFound
+              : " · Gradle 正在解析前置依赖")
+            : "";
+          var progress = "Minecraft " + task.completed + "/" + task.total
+            + (task.currentPhase ? " · " + sourcePhaseLabel(task.currentPhase) : "")
+            + dependencyProgress;
+          log.textContent = progress + "\n" + (task.logs || []).join("\n");
+          log.scrollTop = log.scrollHeight;
+        }
+        if (task.state !== "running") {
+          if (task.state === "completed") {
+            await api("/api/open-folder", { method: "POST", body: { path: task.outputPath } });
+            invalidateDetailCache(modId);
+            await refreshDetail({ force: true });
+            showModal(
+              "开发源码已准备",
+              "项目源码目录：" + task.outputPath + "\nMinecraft 源码与 "
+                + (task.dependenciesPrepared || 0) + " 个前置模组源码已就绪。",
+            );
+            notify("开发源码已准备并打开文件夹", task.dependencyFailures ? "warning" : "success");
+          } else if (task.state === "cancelled") {
+            notify("源码准备已取消", "warning");
+            closeModal();
+          } else {
+            throw new Error(task.lastError || "源码准备失败");
+          }
+          break;
+        }
+        await new Promise(function (resolve) { setTimeout(resolve, 1000); });
+      }
+    } catch (e) {
+      showError("准备开发源码失败：" + (e as Error).message);
+      showModal("源码准备失败", (e as Error).message);
+    } finally {
+      if (cancelButton) cancelButton.hidden = true;
+    }
+  }
+
   async function variantAction(modId, variant, action) {
     if (action === "build") {
       await api("/api/variants/" + variant.id + "/build", { method: "POST", body: { runClient: false } });
@@ -627,6 +754,15 @@ export function bootWorkbench(): void {
       invalidateDetailCache(modId);
       await refreshDetail({ force: true });
       notify("客户端正在启动，请稍候（首次需下载依赖，游戏窗口打开前队列会显示运行中）");
+    } else if (action === "sources") {
+      if (variant.sourceStatus?.ready && variant.sourceStatus.rootPath) {
+        await api("/api/open-folder", { method: "POST", body: { path: variant.sourceStatus.rootPath } });
+        notify("已打开开发源码文件夹");
+      } else {
+        await prepareVariantSources(modId, variant, false);
+      }
+    } else if (action === "sources-refresh") {
+      await prepareVariantSources(modId, variant, true);
     } else if (action === "folder") {
       await api("/api/open-folder", { method: "POST", body: { path: variant.projectPath } });
       notify("已请求打开项目文件夹");
@@ -1016,6 +1152,7 @@ export function bootWorkbench(): void {
         ["模组", form.name + "  ·  " + form.modId],
         ["开发环境", (LOADER_LABELS[state.selectedLoader] || state.selectedLoader) + "  ·  Minecraft " + state.selectedMc],
         ["映射", state.selectedMappings || "Mojang 官方映射"],
+        ["运行端", sideLayoutSummaryLabel()],
         ["项目目录", $("inp-dir").value.trim()],
         ["镜像", form.mirror ? "使用国内镜像" : "使用官方源"],
       ];
@@ -1034,7 +1171,7 @@ export function bootWorkbench(): void {
     LOADERS.forEach(function (ldr) {
       var c = document.createElement("label");
       c.className = "card";
-      c.innerHTML = '<input class="sr-only loader-radio" type="radio" name="loader" value="' + ldr.id + '"><span class="loader-card-mark">' + ldr.icon + '</span><span class="label">' + ldr.label + '</span><span class="hint">' + ldr.hint + '</span><span class="card-check">' + icon("check") + '</span>';
+      c.innerHTML = '<input class="sr-only loader-radio" type="radio" name="loader" value="' + ldr.id + '"><span class="loader-card-mark loader-' + ldr.id + '">' + loaderIcon(ldr.id) + '</span><span class="label">' + ldr.label + '</span><span class="hint">' + ldr.hint + '</span><span class="card-check">' + icon("check") + '</span>';
       function selectLoaderCard() {
         document.querySelectorAll(".card").forEach(function (x) { x.classList.remove("selected"); });
         c.classList.add("selected");
@@ -1061,6 +1198,7 @@ export function bootWorkbench(): void {
         });
       }
       refreshDefaultProjectPath();
+      updateSideLayoutUi();
       loadVersions(state.selectedLoader);
     });
 
@@ -1118,11 +1256,14 @@ export function bootWorkbench(): void {
       state.selectedMc = $("sel-mc").value;
       syncProjectPath();
       updateMappingsUiForVersion(state.selectedMc);
+      updateSideLayoutUi();
       refreshMappings();
     });
     $("sel-mappings").addEventListener("change", function () {
       state.selectedMappings = $("sel-mappings").value;
     });
+    var sideLayoutPicker = $("side-layout-picker");
+    if (sideLayoutPicker) initSideLayoutPicker(sideLayoutPicker);
     $("gen-cancel").addEventListener("click", function () {
       state.generationCancelled = true;
       if (state.activeAbort) state.activeAbort.abort();
@@ -1141,6 +1282,110 @@ export function bootWorkbench(): void {
     var first = parseInt(parts[0], 10);
     if (first === 1) return false;
     return first >= 26;
+  }
+
+  function supportsSplitSourcesForMc(mc) {
+    if (!mc) return false;
+    var parts = mc.split(".").map(function (p) { return parseInt(p, 10) || 0; });
+    if (parts[0] === 1) return (parts[1] || 0) >= 18;
+    return parts[0] >= 18;
+  }
+
+  function initSideLayoutPicker(container: HTMLElement) {
+    container.innerHTML = "";
+    SIDE_LAYOUT_OPTIONS.forEach(function (opt) {
+      var label = document.createElement("label");
+      label.className = "side-layout-option";
+      label.dataset.layout = opt.id;
+      var hoverTip = SIDE_LAYOUT_HOVER_TIPS[opt.id] || "";
+      label.title = hoverTip;
+      label.innerHTML =
+        '<input class="sr-only" type="radio" name="side-layout" value="' + esc(opt.id) + '">' +
+        '<span class="side-layout-label">' + esc(opt.label) + "</span>" +
+        '<span class="side-layout-hover-tip">' + esc(hoverTip) + "</span>";
+      label.addEventListener("click", function (e) {
+        var splitDisabled = opt.id === "split" && label.classList.contains("is-disabled");
+        if (splitDisabled) {
+          e.preventDefault();
+          return;
+        }
+        selectSideLayoutOption(opt.id);
+      });
+      container.appendChild(label);
+    });
+    selectSideLayoutOption(state.selectedSideLayout || defaultSideLayoutForSelection());
+  }
+
+  function selectSideLayoutOption(layoutId: string) {
+    state.selectedSideLayout = layoutId;
+    document.querySelectorAll(".side-layout-option").forEach(function (node) {
+      var el = node as HTMLElement;
+      var radio = el.querySelector<HTMLInputElement>('input[type="radio"]');
+      var active = el.dataset.layout === layoutId && !el.classList.contains("is-disabled");
+      el.classList.toggle("selected", active);
+      if (radio) radio.checked = active;
+    });
+    updateSideLayoutHint();
+  }
+
+  function resolveSideLayoutForMc(loader: string, mc: string, requested: string) {
+    if (requested === "split" && loader === "fabric" && !supportsSplitSourcesForMc(mc)) return "unified";
+    return requested;
+  }
+
+  function sideLayoutBatchNote(requested: string, loader: string, versions: string[]) {
+    if (requested !== "split" || loader !== "fabric") {
+      return "运行端：" + sideLayoutSummaryLabel();
+    }
+    var fallbackCount = versions.filter(function (mc) {
+      return !supportsSplitSourcesForMc(mc);
+    }).length;
+    if (!fallbackCount) return "运行端：客户端 / 通用分离（全部版本支持）";
+    return "运行端：分离（其中 " + fallbackCount + " 个旧版本将自动改为「一起」）";
+  }
+
+  function defaultSideLayoutForSelection() {
+    return "unified";
+  }
+
+  function getSelectedSideLayout() {
+    var checked = document.querySelector<HTMLInputElement>('input[name="side-layout"]:checked');
+    return checked?.value || state.selectedSideLayout || defaultSideLayoutForSelection();
+  }
+
+  function sideLayoutSummaryLabel() {
+    var id = getSelectedSideLayout();
+    var opt = SIDE_LAYOUT_OPTIONS.find(function (o) { return o.id === id; });
+    return opt ? opt.label : id;
+  }
+
+  function updateSideLayoutHint() {
+    var hint = $("side-layout-hint");
+    if (!hint) return;
+    var layout = getSelectedSideLayout();
+    var text = SIDE_LAYOUT_HINTS[layout] || "";
+    if (state.selectedLoader !== "fabric") {
+      text += " Forge / NeoForge 使用单一 src/main 源码集；「分离」与「一起」效果相同。";
+    } else if (layout === "split" && !supportsSplitSourcesForMc(state.selectedMc)) {
+      text += " 当前 Minecraft 版本不支持 Loom 分源，将自动使用单源码集。";
+    }
+    hint.textContent = text;
+  }
+
+  function updateSideLayoutUi() {
+    var canSplit = state.selectedLoader === "fabric" && supportsSplitSourcesForMc(state.selectedMc);
+    document.querySelectorAll(".side-layout-option").forEach(function (node) {
+      var el = node as HTMLElement;
+      if (el.dataset.layout !== "split") return;
+      el.classList.toggle("is-disabled", !canSplit);
+      var radio = el.querySelector<HTMLInputElement>('input[type="radio"]');
+      if (radio) radio.disabled = !canSplit;
+    });
+    if (!canSplit && getSelectedSideLayout() === "split") {
+      selectSideLayoutOption("unified");
+      return;
+    }
+    selectSideLayoutOption(getSelectedSideLayout() || defaultSideLayoutForSelection());
   }
 
   function updateMappingsUiForVersion(mc) {
@@ -1391,7 +1636,7 @@ export function bootWorkbench(): void {
       group = "com.example." + modId.replace(/_/g, "");
       $("inp-group").value = group;
     }
-    return { name: name, modId: modId, group: group, mirror: mirror };
+    return { name: name, modId: modId, group: group, mirror: mirror, sideLayout: getSelectedSideLayout() };
   }
 
   async function resolveMappingsForVersion(loader, mc) {
@@ -1481,6 +1726,7 @@ export function bootWorkbench(): void {
       "--yes", "--loader", state.selectedLoader, "--mc", state.selectedMc,
       "--modid", form.modId, "--name", form.name, "--group", form.group, "--dir", dir,
       "--mappings", state.selectedMappings,
+      "--side-layout", resolveSideLayoutForMc(state.selectedLoader, state.selectedMc, form.sideLayout),
     ];
     if (!form.mirror) args.push("--no-mirror");
 
@@ -1537,7 +1783,8 @@ export function bootWorkbench(): void {
     if (!await confirmAction({
       title: "批量创建所有版本",
       message: "将为「" + form.name + "」创建 " + loaderLabel + " 的全部 " + versions.length + " 个版本。",
-      detail: "任务 " + maxSlots + " 路 · Gradle 构建最多 " + gradleMax + " 路 · 客户端验证最多 " + clientMax + " 路（安全限流）。\n已存在且非空的目录会跳过。",
+      detail: sideLayoutBatchNote(form.sideLayout, state.selectedLoader, versions)
+        + "\n任务 " + maxSlots + " 路 · Gradle 构建最多 " + gradleMax + " 路 · 客户端验证最多 " + clientMax + " 路（安全限流）。\n已存在且非空的目录会跳过。",
       confirmLabel: "开始批量创建",
     })) return;
 
@@ -1583,6 +1830,7 @@ export function bootWorkbench(): void {
           "--yes", "--loader", state.selectedLoader, "--mc", mc,
           "--modid", form.modId, "--name", form.name, "--group", form.group, "--dir", dir,
           "--mappings", mappings,
+          "--side-layout", resolveSideLayoutForMc(state.selectedLoader, mc, form.sideLayout),
         ];
         if (!form.mirror) args.push("--no-mirror");
 
@@ -1749,6 +1997,249 @@ export function bootWorkbench(): void {
     }
   }
 
+  var sourceStatusCache: any = null;
+  var sourcePollTimer: ReturnType<typeof setInterval> | null = null;
+  var sourceOptionsToken = 0;
+  var lastSourceTaskNotice = "";
+  var sourceAutoOpenTask: { id: string; scope: "single" | "all" } | null = null;
+
+  function sourcePhaseLabel(phase) {
+    return {
+      planning: "规划版本与映射",
+      scaffolding: "准备加载器开发环境",
+      mapping: "生成映射产物",
+      extracting: "提取与反编译源码",
+      dependencies: "解析并准备前置模组源码",
+      linking: "写入项目源码入口",
+      verifying: "校验源码完整性",
+    }[phase] || "处理中";
+  }
+
+  function selectedSourceEntry() {
+    if (!sourceStatusCache) return null;
+    var loader = ($("source-loader") as HTMLSelectElement | null)?.value;
+    var mc = ($("source-mc") as HTMLSelectElement | null)?.value;
+    var mapping = ($("source-mapping") as HTMLSelectElement | null)?.value;
+    return (sourceStatusCache.entries || []).find(function (entry) {
+      return entry.loader === loader && entry.minecraftVersion === mc && entry.mapping === mapping;
+    }) || null;
+  }
+
+  function renderSelectedSourcePath() {
+    var entry = selectedSourceEntry();
+    var input = $("source-selected-path") as HTMLInputElement | null;
+    var open = $("btn-source-open-selected") as HTMLButtonElement | null;
+    var copy = $("btn-source-copy-selected") as HTMLButtonElement | null;
+    if (input) input.value = entry?.sourcePath || "";
+    if (open) open.disabled = !entry;
+    if (copy) copy.disabled = !entry;
+  }
+
+  function scheduleSourcePolling(running) {
+    if (running && !sourcePollTimer) {
+      sourcePollTimer = setInterval(function () { void loadSourceStatus(); }, 1200);
+    } else if (!running && sourcePollTimer) {
+      clearInterval(sourcePollTimer);
+      sourcePollTimer = null;
+    }
+  }
+
+  function renderSourceStatus(data) {
+    sourceStatusCache = data;
+    var rootInput = $("source-root-path") as HTMLInputElement | null;
+    if (rootInput) rootInput.value = data.rootPath || "";
+    setText("source-library-count", "Minecraft " + (data.entries?.length || 0)
+      + " 组 · 前置模组 " + (data.modEntries || 0) + " 组");
+    renderSelectedSourcePath();
+
+    var task = data.task;
+    var badge = $("source-state-badge");
+    var panel = $("source-progress-panel") as HTMLElement | null;
+    var cancel = $("btn-source-cancel") as HTMLButtonElement | null;
+    var currentBtn = $("btn-source-current") as HTMLButtonElement | null;
+    var allBtn = $("btn-source-all") as HTMLButtonElement | null;
+    var force = $("source-force") as HTMLInputElement | null;
+    var controls = [$("source-loader"), $("source-mc"), $("source-mapping")];
+    var running = task?.state === "running";
+    controls.forEach(function (el) { if (el) (el as HTMLInputElement).disabled = running; });
+    if (currentBtn) currentBtn.disabled = running;
+    if (allBtn) allBtn.disabled = running;
+    if (force) force.disabled = running;
+    if (cancel) cancel.hidden = !running;
+
+    if (!task) {
+      if (badge) {
+        badge.textContent = data.entries?.length || data.modEntries ? "缓存就绪" : "缓存为空";
+        badge.className = "source-state-badge" + (data.entries?.length ? " completed" : "");
+      }
+      if (panel) panel.hidden = true;
+      scheduleSourcePolling(false);
+      return;
+    }
+
+    var stateLabels = { running: "运行中", completed: "已完成", failed: "失败", cancelled: "已取消" };
+    if (badge) {
+      badge.textContent = stateLabels[task.state] || task.state;
+      badge.className = "source-state-badge " + task.state;
+    }
+    if (panel) panel.hidden = false;
+    var current = task.current
+      ? (LOADER_LABELS[task.current.loader] || task.current.loader) + " " + task.current.mcVersion
+      : (task.state === "running" ? "正在准备任务" : "任务结束");
+    setText("source-progress-title", current);
+    setText("source-progress-detail", task.state === "running"
+      ? sourcePhaseLabel(task.currentPhase)
+      : (task.lastError || stateLabels[task.state] || task.state));
+    var pct = task.total ? Math.round((task.completed / task.total) * 100) : 0;
+    var bar = $("source-progress-bar") as HTMLElement | null;
+    if (bar) bar.style.width = pct + "%";
+    var track = panel?.querySelector("[role=progressbar]");
+    if (track) track.setAttribute("aria-valuenow", String(pct));
+    setText("source-progress-stats", "进度 " + task.completed + "/" + task.total
+      + " · 成功 " + task.successes + " · 跳过 " + task.skipped + " · 失败 " + task.failures);
+    var log = $("source-task-log");
+    if (log) {
+      log.textContent = (task.logs || []).join("\n") || "等待第一条任务日志…";
+      log.scrollTop = log.scrollHeight;
+    }
+    scheduleSourcePolling(running);
+
+    if (!running) {
+      var noticeKey = task.id + ":" + task.state;
+      if (lastSourceTaskNotice !== noticeKey) {
+        lastSourceTaskNotice = noticeKey;
+        if (task.state === "completed") {
+          notify("源码任务完成：成功 " + task.successes + "，跳过 " + task.skipped
+            + (task.failures ? "，失败 " + task.failures : ""), task.failures ? "warning" : "success");
+        } else if (task.state === "failed") {
+          notify("源码任务失败：" + (task.lastError || "请查看任务日志"), "error");
+        } else if (task.state === "cancelled") {
+          notify("源码任务已取消", "warning");
+        }
+      }
+      if (task.state === "completed" && sourceAutoOpenTask?.id === task.id) {
+        var autoOpenPath = sourceAutoOpenTask.scope === "single" ? task.outputPath : data.rootPath;
+        sourceAutoOpenTask = null;
+        if (autoOpenPath) {
+          void api("/api/open-folder", { method: "POST", body: { path: autoOpenPath } })
+            .then(function () { notify("已自动打开源码文件夹"); })
+            .catch(function (e) { showError("源码已完成，但打开文件夹失败：" + (e as Error).message); });
+        }
+      }
+    }
+  }
+
+  async function loadSourceStatus() {
+    try {
+      renderSourceStatus(await api("/api/sources/status"));
+    } catch (e) {
+      scheduleSourcePolling(false);
+      setText("source-state-badge", "读取失败");
+    }
+  }
+
+  async function loadSourceMappings() {
+    var loader = ($("source-loader") as HTMLSelectElement).value;
+    var mc = ($("source-mc") as HTMLSelectElement).value;
+    var select = $("source-mapping") as HTMLSelectElement;
+    if (!mc) return;
+    select.disabled = true;
+    try {
+      var data = await api("/api/mappings/" + loader + "/" + encodeURIComponent(mc));
+      select.innerHTML = "";
+      (data.options || []).filter(function (option) { return option.available; }).forEach(function (option) {
+        var item = document.createElement("option");
+        item.value = option.id;
+        item.textContent = option.label + (option.version ? " · " + option.version : "");
+        select.appendChild(item);
+      });
+      if (data.default) select.value = data.default;
+    } catch (e) {
+      select.innerHTML = '<option value="mojmap">官方默认映射</option>';
+    } finally {
+      select.disabled = sourceStatusCache?.task?.state === "running";
+      renderSelectedSourcePath();
+    }
+  }
+
+  async function loadSourceVersions(preferred) {
+    var token = ++sourceOptionsToken;
+    var loader = ($("source-loader") as HTMLSelectElement).value;
+    var select = $("source-mc") as HTMLSelectElement;
+    select.disabled = true;
+    select.innerHTML = "<option>正在读取版本…</option>";
+    try {
+      var data = await api("/api/versions/" + loader);
+      if (token !== sourceOptionsToken) return;
+      select.innerHTML = "";
+      (data.versions || []).forEach(function (version) {
+        var option = document.createElement("option");
+        option.value = version;
+        option.textContent = version;
+        select.appendChild(option);
+      });
+      if (preferred && (data.versions || []).includes(preferred)) select.value = preferred;
+      setText("source-scope-note", "单版本完成后自动打开源码文件夹；全部版本将顺序处理 "
+        + (data.versions?.length || 0) + " 个版本，完成后只打开源码仓库。");
+      await loadSourceMappings();
+    } catch (e) {
+      select.innerHTML = "<option>版本列表读取失败</option>";
+    } finally {
+      select.disabled = sourceStatusCache?.task?.state === "running";
+    }
+  }
+
+  async function startSourceTask(scope) {
+    var loader = ($("source-loader") as HTMLSelectElement).value;
+    var mcVersion = ($("source-mc") as HTMLSelectElement).value;
+    var mapping = ($("source-mapping") as HTMLSelectElement).value;
+    if (scope === "all") {
+      var countText = ($("source-scope-note") as HTMLElement)?.textContent || "";
+      if (!await confirmAction({
+        title: "获取全部版本源码",
+        message: "将依次生成 " + (LOADER_LABELS[loader] || loader) + " 支持的全部 Minecraft 版本源码。",
+        detail: countText + "\n任务可随时取消；已经有 READY 标记的版本默认不会重复生成。",
+        confirmLabel: "开始获取",
+      })) return;
+    }
+    hideError();
+    try {
+      var startedTask = await api("/api/sources/start", {
+        method: "POST",
+        body: {
+          scope: scope,
+          loader: loader,
+          mcVersion: scope === "single" ? mcVersion : undefined,
+          mapping: scope === "single" ? mapping : undefined,
+          force: ($("source-force") as HTMLInputElement).checked,
+          mirror: true,
+        },
+      });
+      sourceAutoOpenTask = startedTask?.task?.id ? { id: startedTask.task.id, scope: scope } : null;
+      notify(scope === "single" ? "源码任务已开始" : "全部版本源码任务已开始");
+      await loadSourceStatus();
+    } catch (e) {
+      showError("无法启动源码任务：" + (e as Error).message);
+    }
+  }
+
+  async function copySourcePath(inputId) {
+    var value = ($(inputId) as HTMLInputElement | null)?.value;
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      notify("路径已复制");
+    } catch {
+      showError("复制失败，请手动选择路径文本");
+    }
+  }
+
+  async function openSourcePath(inputId) {
+    var value = ($(inputId) as HTMLInputElement | null)?.value;
+    if (!value) return;
+    await api("/api/open-folder", { method: "POST", body: { path: value } });
+  }
+
   async function refreshAllMetaFromSettings() {
     var btn = $("btn-settings-refresh-versions") as HTMLButtonElement | null;
     if (btn) btn.disabled = true;
@@ -1800,7 +2291,7 @@ export function bootWorkbench(): void {
     });
     renderScanDirList("scan-dirs-list", extra, data.projectsRoot);
     renderConcurrencySettings(data.concurrency);
-    await loadMetaCacheStatus();
+    await Promise.all([loadMetaCacheStatus(), loadSourceStatus()]);
   }
 
   function renderConcurrencySettings(payload) {
@@ -2011,6 +2502,16 @@ export function bootWorkbench(): void {
   $("modal-close").addEventListener("click", function () {
     closeModal();
   });
+  $("modal-source-cancel")?.addEventListener("click", async function () {
+    var button = $("modal-source-cancel") as HTMLButtonElement;
+    button.disabled = true;
+    try {
+      await api("/api/sources/cancel", { method: "POST" });
+      notify("正在取消源码准备…", "warning");
+    } finally {
+      button.disabled = false;
+    }
+  });
   $("modal-overlay")?.addEventListener("click", function (event) {
     if (event.target === $("modal-overlay")) closeModal();
   });
@@ -2179,7 +2680,30 @@ export function bootWorkbench(): void {
   });
 
   var buildAllPendingMod: Record<string, unknown> | null = null;
+  var buildAllPendingMatrix: Record<string, unknown> | null = null;
   var buildAllReturnFocus: HTMLElement | null = null;
+  var buildAllBusy = false;
+
+  function setBuildAllBusy(busy: boolean, message?: string) {
+    buildAllBusy = busy;
+    var confirmBtn = $("build-all-confirm") as HTMLButtonElement | null;
+    var cancelBtn = $("build-all-cancel") as HTMLButtonElement | null;
+    var options = $("build-all-modal")?.querySelector(".build-all-options");
+    if (confirmBtn) {
+      confirmBtn.disabled = busy;
+      confirmBtn.textContent = busy ? "处理中…" : "开始构建";
+    }
+    if (cancelBtn) cancelBtn.disabled = busy;
+    if (options) {
+      options.querySelectorAll("input, select").forEach(function (el) {
+        (el as HTMLInputElement).disabled = busy;
+      });
+    }
+    if (busy && message) {
+      var summary = $("build-all-summary");
+      if (summary) summary.textContent = message;
+    }
+  }
 
   function filterVariantsForBuildAll(mod, opts) {
     return (mod.variants || []).filter(function (v) {
@@ -2189,13 +2713,46 @@ export function bootWorkbench(): void {
     });
   }
 
-  function openBuildAllModal(mod) {
+  function isMatrixLoaderMcSupported(matrix, loader, mcVersion) {
+    if (!matrix || !matrix.supported) return false;
+    var list = matrix.supported[loader];
+    if (!list) return false;
+    if (Array.isArray(list)) return list.indexOf(mcVersion) >= 0;
+    return false;
+  }
+
+  function collectBuildAllTargets(mod, matrix, opts) {
+    var existing = filterVariantsForBuildAll(mod, opts);
+    var pending: Array<{ loader: string; mcVersion: string }> = [];
+    if (opts.includeMissingLoaders === false || !matrix) {
+      return { existing: existing, pending: pending };
+    }
+    var mcVersions: Record<string, boolean> = {};
+    (mod.variants || []).forEach(function (v) { mcVersions[v.mcVersion] = true; });
+    (["forge", "neoforge"] as const).forEach(function (loader) {
+      if (opts.loader && loader !== opts.loader) return;
+      Object.keys(mcVersions).forEach(function (mcVersion) {
+        var exists = (mod.variants || []).some(function (v) {
+          return v.loader === loader && v.mcVersion === mcVersion;
+        });
+        if (exists) return;
+        if (!isMatrixLoaderMcSupported(matrix, loader, mcVersion)) return;
+        pending.push({ loader: loader, mcVersion: mcVersion });
+      });
+    });
+    return { existing: existing, pending: pending };
+  }
+
+  function openBuildAllModal(mod, matrix) {
     buildAllReturnFocus = document.activeElement as HTMLElement | null;
     buildAllPendingMod = mod;
+    buildAllPendingMatrix = matrix || null;
     var failedOnlyEl = $("build-all-failed-only") as HTMLInputElement | null;
     var loaderEl = $("build-all-loader") as HTMLSelectElement | null;
+    var includeMissingEl = $("build-all-include-missing") as HTMLInputElement | null;
     if (failedOnlyEl) failedOnlyEl.checked = false;
     if (loaderEl) loaderEl.value = "";
+    if (includeMissingEl) includeMissingEl.checked = true;
     refreshBuildAllModalList();
     $("build-all-modal")?.classList.add("visible");
     requestAnimationFrame(function () {
@@ -2203,8 +2760,11 @@ export function bootWorkbench(): void {
     });
   }
 
-  function closeBuildAllModal() {
+  function closeBuildAllModal(force?: boolean) {
+    if (buildAllBusy && !force) return;
     buildAllPendingMod = null;
+    buildAllPendingMatrix = null;
+    setBuildAllBusy(false);
     $("build-all-modal")?.classList.remove("visible");
     buildAllReturnFocus?.focus();
     buildAllReturnFocus = null;
@@ -2214,16 +2774,21 @@ export function bootWorkbench(): void {
     if (!buildAllPendingMod) return;
     var failedOnlyEl = $("build-all-failed-only") as HTMLInputElement | null;
     var loaderEl = $("build-all-loader") as HTMLSelectElement | null;
+    var includeMissingEl = $("build-all-include-missing") as HTMLInputElement | null;
     var opts = {
       failedOnly: !!(failedOnlyEl && failedOnlyEl.checked),
       loader: loaderEl ? loaderEl.value : "",
+      includeMissingLoaders: !(includeMissingEl && !includeMissingEl.checked),
     };
-    var variants = filterVariantsForBuildAll(buildAllPendingMod, opts);
+    var targets = collectBuildAllTargets(buildAllPendingMod, buildAllPendingMatrix, opts);
+    var variants = targets.existing;
+    var pending = targets.pending;
+    var totalCount = variants.length + pending.length;
     var summary = $("build-all-summary");
     var list = $("build-all-list");
     if (summary) {
-      summary.textContent = variants.length
-        ? "将为「" + buildAllPendingMod.displayName + "」构建 " + variants.length + " 个变体（按 CPU 核数并行）："
+      summary.textContent = totalCount
+        ? "将为「" + buildAllPendingMod.displayName + "」构建 " + totalCount + " 个变体（按 CPU 核数并行）："
         : "当前筛选条件下没有可构建的变体。";
     }
     if (list) {
@@ -2233,73 +2798,136 @@ export function bootWorkbench(): void {
         li.textContent = (LOADER_LABELS[v.loader] || v.loader) + " " + v.mcVersion;
         list.appendChild(li);
       });
+      pending.forEach(function (p) {
+        var li = document.createElement("li");
+        li.textContent = (LOADER_LABELS[p.loader] || p.loader) + " " + p.mcVersion + "（将先生成）";
+        list.appendChild(li);
+      });
     }
     var confirmBtn = $("build-all-confirm") as HTMLButtonElement | null;
-    if (confirmBtn) confirmBtn.disabled = variants.length === 0;
+    if (confirmBtn) confirmBtn.disabled = totalCount === 0;
   }
 
   async function confirmBuildAll() {
-    if (!buildAllPendingMod || !state.currentModId) return;
+    if (buildAllBusy) return;
+    if (!buildAllPendingMod) {
+      notify("无法开始构建：请先打开模组详情", "warning");
+      return;
+    }
+    var modId = String(buildAllPendingMod.id || "");
+    if (!modId) {
+      notify("无法开始构建：模组信息无效", "warning");
+      return;
+    }
     var modName = String(buildAllPendingMod.displayName || "模组");
     var failedOnlyEl = $("build-all-failed-only") as HTMLInputElement | null;
     var loaderEl = $("build-all-loader") as HTMLSelectElement | null;
-    var body: Record<string, unknown> = { runClient: false };
-    if (failedOnlyEl && failedOnlyEl.checked) body.failedOnly = true;
-    if (loaderEl && loaderEl.value) body.loader = loaderEl.value;
+    var includeMissingEl = $("build-all-include-missing") as HTMLInputElement | null;
+    var includeMissingLoaders = !(includeMissingEl && !includeMissingEl.checked);
+    var filterOpts = {
+      failedOnly: !!(failedOnlyEl && failedOnlyEl.checked),
+      loader: loaderEl ? loaderEl.value : "",
+      includeMissingLoaders: includeMissingLoaders,
+    };
+    var targets = collectBuildAllTargets(buildAllPendingMod, buildAllPendingMatrix, filterOpts);
+    var mod = buildAllPendingMod;
+    var genErrors: string[] = [];
 
     hideError();
+    setBuildAllBusy(true, "准备中…");
+
     try {
-      var result = await api("/api/mods/" + state.currentModId + "/build-all", {
+      if (includeMissingLoaders && targets.pending.length) {
+        for (var i = 0; i < targets.pending.length; i++) {
+          var pending = targets.pending[i];
+          setBuildAllBusy(
+            true,
+            "正在生成 " + (LOADER_LABELS[pending.loader] || pending.loader) + " "
+              + pending.mcVersion + "（" + (i + 1) + "/" + targets.pending.length + "）…",
+          );
+          try {
+            await generateVariantQuiet(mod, pending.loader, pending.mcVersion);
+            var detailData = await api("/api/mods/" + modId + "/detail") as {
+              mod: Record<string, unknown>;
+              matrix: Record<string, unknown>;
+            };
+            mod = detailData.mod;
+            buildAllPendingMod = mod;
+            buildAllPendingMatrix = detailData.matrix;
+          } catch (genErr) {
+            genErrors.push(
+              (LOADER_LABELS[pending.loader] || pending.loader) + " " + pending.mcVersion
+                + "：" + ((genErr as Error).message || String(genErr)),
+            );
+          }
+        }
+      }
+
+      setBuildAllBusy(true, "正在加入构建队列…");
+      var body: Record<string, unknown> = { runClient: false };
+      if (filterOpts.failedOnly) body.failedOnly = true;
+      if (filterOpts.loader) body.loader = filterOpts.loader;
+
+      var result = await api("/api/mods/" + modId + "/build-all", {
         method: "POST",
         body: body,
-      });
-      closeBuildAllModal();
+      }) as {
+        jobIds?: string[];
+        count?: number;
+        skipped?: { queued?: number; missing?: number };
+      };
+
+      closeBuildAllModal(true);
       if (result.jobIds && result.jobIds.length) {
         state.buildBatch = {
-          modId: state.currentModId,
+          modId: modId,
           modName: modName,
           jobIds: result.jobIds,
           done: {},
         };
       }
       updateQueueBar();
-      invalidateDetailCache(state.currentModId);
+      invalidateDetailCache(modId);
       await refreshDetail({ force: true });
       var skipped = result.skipped || {};
-      var extra = [];
+      var extra: string[] = [];
       if (skipped.queued) extra.push(skipped.queued + " 个已在队列");
       if (skipped.missing) extra.push(skipped.missing + " 个路径不存在");
       var suffix = extra.length ? "（跳过 " + extra.join("，") + "）" : "";
-      notify(result.count + " 个变体已加入构建队列" + suffix);
+      if (genErrors.length) {
+        notify("部分变体生成失败（" + genErrors.length + " 个），其余已处理", "warning");
+      }
+      notify((result.count || 0) + " 个变体已加入构建队列" + suffix);
     } catch (e) {
-      showError("构建全部失败：" + e.message);
+      var msg = e instanceof Error ? e.message : String(e);
+      notify("构建全部失败：" + msg, "error");
+      var summary = $("build-all-summary");
+      if (summary) summary.textContent = "失败：" + msg;
+      setBuildAllBusy(false);
+      refreshBuildAllModalList();
     }
   }
 
   $("btn-build-all").addEventListener("click", async function () {
     if (!state.currentModId) return;
-    var mod = state.detailCache[state.currentModId]?.mod
-      || state.mods.find(function (m) { return m.id === state.currentModId; });
-    if (!mod) {
-      try {
-        var data = await api("/api/mods/" + state.currentModId);
-        mod = data.mod;
-      } catch (e) {
-        showError("加载模组信息失败：" + e.message);
+    hideError();
+    try {
+      var detailData = await api("/api/mods/" + state.currentModId + "/detail");
+      if (!detailData.mod || !detailData.mod.variants || !detailData.mod.variants.length) {
+        notify("暂无变体可构建");
         return;
       }
+      openBuildAllModal(detailData.mod, detailData.matrix);
+    } catch (e) {
+      showError("加载模组信息失败：" + e.message);
     }
-    if (!mod.variants || !mod.variants.length) {
-      notify("暂无变体可构建");
-      return;
-    }
-    openBuildAllModal(mod);
   });
 
   $("build-all-cancel")?.addEventListener("click", closeBuildAllModal);
   $("build-all-confirm")?.addEventListener("click", function () { void confirmBuildAll(); });
   $("build-all-failed-only")?.addEventListener("change", refreshBuildAllModalList);
   $("build-all-loader")?.addEventListener("change", refreshBuildAllModalList);
+  $("build-all-include-missing")?.addEventListener("change", refreshBuildAllModalList);
   $("build-all-modal")?.addEventListener("click", function (e) {
     if (e.target === $("build-all-modal")) closeBuildAllModal();
   });
@@ -2401,6 +3029,32 @@ export function bootWorkbench(): void {
   $("btn-settings-refresh-mappings")?.addEventListener("click", function () {
     void refreshAllMappingsFromSettings();
   });
+  $("source-loader")?.addEventListener("change", function () {
+    void loadSourceVersions();
+  });
+  $("source-mc")?.addEventListener("change", function () {
+    void loadSourceMappings();
+  });
+  $("source-mapping")?.addEventListener("change", renderSelectedSourcePath);
+  $("btn-source-current")?.addEventListener("click", function () {
+    void startSourceTask("single");
+  });
+  $("btn-source-all")?.addEventListener("click", function () {
+    void startSourceTask("all");
+  });
+  $("btn-source-cancel")?.addEventListener("click", async function () {
+    try {
+      await api("/api/sources/cancel", { method: "POST" });
+      notify("正在取消源码任务…", "warning");
+      await loadSourceStatus();
+    } catch (e) {
+      showError("取消源码任务失败：" + (e as Error).message);
+    }
+  });
+  $("btn-source-open-root")?.addEventListener("click", function () { void openSourcePath("source-root-path"); });
+  $("btn-source-copy-root")?.addEventListener("click", function () { void copySourcePath("source-root-path"); });
+  $("btn-source-open-selected")?.addEventListener("click", function () { void openSourcePath("source-selected-path"); });
+  $("btn-source-copy-selected")?.addEventListener("click", function () { void copySourcePath("source-selected-path"); });
 
   // ============ Init ============
 

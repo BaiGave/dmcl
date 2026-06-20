@@ -17,6 +17,23 @@ import { loadDist, repoDist } from "./dist-loader";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type WorkspaceModule = any;
 
+interface MinecraftSourcesModule {
+  getMinecraftSourceStatus(): unknown;
+  startMinecraftSourceTask(request: {
+    scope: "single" | "all";
+    loader: "fabric" | "forge" | "neoforge";
+    mcVersion?: string;
+    mapping?: "yarn" | "mojmap" | "parchment" | "mcp";
+    force?: boolean;
+    mirror?: boolean;
+    projectPath?: string;
+    projectModId?: string;
+    includeDependencies?: boolean;
+  }): unknown;
+  cancelMinecraftSourceTask(): unknown;
+  getProjectSourceStatus(projectPath: string): unknown;
+}
+
 interface WsVariant {
   id: string;
   loader: string;
@@ -90,6 +107,7 @@ function pickBuildableVariants(
 }
 
 let wsMod: WorkspaceModule | null = null;
+let minecraftSourcesMod: MinecraftSourcesModule | null = null;
 
 async function ws(): Promise<WorkspaceModule> {
   if (!wsMod) {
@@ -97,6 +115,21 @@ async function ws(): Promise<WorkspaceModule> {
     wsMod = await loadDist(repoDist("workspace", "index.js"));
   }
   return wsMod;
+}
+
+async function minecraftSources(): Promise<MinecraftSourcesModule> {
+  if (!minecraftSourcesMod) {
+    minecraftSourcesMod = await loadDist<MinecraftSourcesModule>(repoDist("sources", "index.js"));
+  }
+  return minecraftSourcesMod;
+}
+
+export async function cancelSourceJobs(): Promise<void> {
+  try {
+    (await minecraftSources()).cancelMinecraftSourceTask();
+  } catch {
+    // App shutdown must continue even when the source module was never loaded.
+  }
 }
 
 async function readBody(req: IncomingMessage): Promise<unknown> {
@@ -255,11 +288,36 @@ export async function handleWorkspaceApi(
     return true;
   }
 
+  // GET /api/mods/:id/detail — 单次磁盘扫描 + 矩阵（详情页专用）
+  const detailMatch = urlPath.match(/^\/api\/mods\/([^/]+)\/detail$/);
+  if (detailMatch && method === "GET") {
+    store.refresh();
+    const m = store.getMod(detailMatch[1]);
+    if (!m) { json(res, { error: "模组不存在" }, 404); return true; }
+    const matrix = await mod.buildMatrix(m);
+    const sources = await minecraftSources();
+    const detailMod = {
+      ...m,
+      variants: m.variants.map((variant: WsVariant) => ({
+        ...variant,
+        sourceStatus: sources.getProjectSourceStatus(variant.projectPath),
+      })),
+    };
+    json(res, {
+      mod: detailMod,
+      matrix: mod.serializeMatrixResult(matrix),
+    });
+    return true;
+  }
+
   // GET /api/mods/:id/matrix
   const matrixMatch = urlPath.match(/^\/api\/mods\/([^/]+)\/matrix$/);
   if (matrixMatch && method === "GET") {
-    store.refresh();
-    const m = store.getMod(matrixMatch[1]);
+    let m = store.getMod(matrixMatch[1]);
+    if (!m) {
+      store.refresh();
+      m = store.getMod(matrixMatch[1]);
+    }
     if (!m) { json(res, { error: "模组不存在" }, 404); return true; }
     const matrix = await mod.buildMatrix(m);
     json(res, mod.serializeMatrixResult(matrix));
@@ -403,6 +461,11 @@ export async function handleWorkspaceApi(
       buildStatus?: string;
     };
 
+    if (!body.loader || !["fabric", "forge", "neoforge"].includes(body.loader)) {
+      json(res, { error: "无效的 loader" }, 400);
+      return true;
+    }
+
     let m = store.findModByModId(body.modId);
     if (!m) {
       try {
@@ -430,7 +493,7 @@ export async function handleWorkspaceApi(
       projectPath: path.resolve(body.projectPath),
       modVersion: body.modVersion ?? "0.1.0",
       group: body.group ?? `com.example.${body.modId}`,
-      mappings: (body.mappings ?? "mojmap") as "yarn" | "mojmap" | "parchment",
+      mappings: (body.mappings ?? "mojmap") as "yarn" | "mojmap" | "parchment" | "mcp",
       buildStatus: (body.buildStatus ?? "success") as "unknown" | "success" | "failed" | "building",
       source: "dmcl",
     });
@@ -450,6 +513,59 @@ export async function handleWorkspaceApi(
       repoRoot: mod.getRepoRoot(),
       concurrency: getConcurrencySettingsPayload(),
     });
+    return true;
+  }
+
+  // GET /api/sources/status — 源码仓库、已完成版本与当前后台任务
+  if (urlPath === "/api/sources/status" && method === "GET") {
+    const sources = await minecraftSources();
+    json(res, sources.getMinecraftSourceStatus());
+    return true;
+  }
+
+  // POST /api/sources/start — 单版本或当前加载器的全部版本
+  if (urlPath === "/api/sources/start" && method === "POST") {
+    const body = (await readBody(req)) as {
+      scope?: "single" | "all";
+      loader?: "fabric" | "forge" | "neoforge";
+      mcVersion?: string;
+      mapping?: "yarn" | "mojmap" | "parchment" | "mcp";
+      force?: boolean;
+      mirror?: boolean;
+    };
+    if (!body.scope || !["single", "all"].includes(body.scope)) {
+      json(res, { error: "请选择源码获取范围" }, 400);
+      return true;
+    }
+    if (!body.loader || !["fabric", "forge", "neoforge"].includes(body.loader)) {
+      json(res, { error: "请选择加载器" }, 400);
+      return true;
+    }
+    if (body.scope === "single" && !body.mcVersion) {
+      json(res, { error: "请选择 Minecraft 版本" }, 400);
+      return true;
+    }
+    try {
+      const sources = await minecraftSources();
+      const task = sources.startMinecraftSourceTask({
+        scope: body.scope,
+        loader: body.loader,
+        mcVersion: body.mcVersion,
+        mapping: body.mapping,
+        force: body.force === true,
+        mirror: body.mirror !== false,
+      });
+      json(res, { ok: true, task }, 202);
+    } catch (err) {
+      json(res, { error: (err as Error).message }, 409);
+    }
+    return true;
+  }
+
+  // POST /api/sources/cancel
+  if (urlPath === "/api/sources/cancel" && method === "POST") {
+    const sources = await minecraftSources();
+    json(res, { ok: true, task: sources.cancelMinecraftSourceTask() });
     return true;
   }
 
@@ -523,6 +639,36 @@ export async function handleWorkspaceApi(
     return true;
   }
 
+  // POST /api/variants/:id/sources — 按当前变体自动准备 MC 与前置模组源码
+  const sourceMatch = urlPath.match(/^\/api\/variants\/([^/]+)\/sources$/);
+  if (sourceMatch && method === "POST") {
+    const found = store.getVariant(sourceMatch[1]);
+    if (!found) { json(res, { error: "变体不存在" }, 404); return true; }
+    if (!fs.existsSync(found.variant.projectPath)) {
+      json(res, { error: "项目目录不存在，请先重新定位项目" }, 400);
+      return true;
+    }
+    const body = (await readBody(req)) as { force?: boolean };
+    try {
+      const sources = await minecraftSources();
+      const task = sources.startMinecraftSourceTask({
+        scope: "single",
+        loader: found.variant.loader,
+        mcVersion: found.variant.mcVersion,
+        mapping: found.variant.mappings,
+        projectPath: found.variant.projectPath,
+        projectModId: found.mod.modId,
+        includeDependencies: true,
+        force: body.force === true,
+        mirror: true,
+      });
+      json(res, { ok: true, task }, 202);
+    } catch (err) {
+      json(res, { error: (err as Error).message }, 409);
+    }
+    return true;
+  }
+
   // POST /api/variants/:id/run
   const runMatch = urlPath.match(/^\/api\/variants\/([^/]+)\/run$/);
   if (runMatch && method === "POST") {
@@ -583,7 +729,9 @@ export async function handleWorkspaceApi(
       loader?: string;
       runClient?: boolean;
       failedOnly?: boolean;
+      includeMissingLoaders?: boolean;
     };
+    store.refresh({ force: true });
     const m = store.getMod(buildAllMatch[1]);
     if (!m) { json(res, { error: "模组不存在" }, 404); return true; }
 
@@ -877,9 +1025,10 @@ export async function handleWorkspaceApi(
   return false;
 }
 
-export async function initWorkspace(repoRoot: string): Promise<void> {
+export async function initWorkspace(repoRoot: string, writableProjectsRoot?: string): Promise<void> {
   const mod = await ws();
   mod.setRepoRoot(repoRoot);
+  if (writableProjectsRoot) mod.setProjectsRoot(writableProjectsRoot);
   mod.ensureProjectsRoot();
   const store = mod.getWorkspace();
   const projectsRoot = mod.getProjectsRoot();
@@ -889,7 +1038,11 @@ export async function initWorkspace(repoRoot: string): Promise<void> {
   mod.reconcileWorkspace(store);
   const projectRoot = path.resolve(__dirname, "..");
   loadDist(repoDist("meta", "meta-cache.js"))
-    .then(({ getMetaCache }) => getMetaCache().refreshIfStale())
+    .then(({ getMetaCache }) => {
+      const cache = getMetaCache();
+      cache.refreshIfStale();
+      void cache.get({ strategy: "cache-first" }).catch(() => {});
+    })
     .catch((err) => console.warn("[dmcl] 元数据缓存初始化跳过:", err));
 }
 

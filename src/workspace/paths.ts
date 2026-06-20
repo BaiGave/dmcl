@@ -5,10 +5,16 @@ import type { LoaderId } from "../types.js";
 import { assertValidModId } from "./validate.js";
 
 let repoRoot: string | null = null;
+let projectsRoot: string | null = null;
 
 /** 由 GUI 启动时注入；未注入时从 dist/workspace 向上推断仓库根目录 */
 export function setRepoRoot(root: string): void {
   repoRoot = path.resolve(root);
+}
+
+/** 安装版注入可写数据目录；开发模式省略时仍使用仓库下的 projects。 */
+export function setProjectsRoot(root: string): void {
+  projectsRoot = path.resolve(root);
 }
 
 export function getRepoRoot(): string {
@@ -19,7 +25,7 @@ export function getRepoRoot(): string {
 
 /** 所有模组项目的根目录：{repo}/projects */
 export function getProjectsRoot(): string {
-  return path.join(getRepoRoot(), "projects");
+  return projectsRoot ?? path.join(getRepoRoot(), "projects");
 }
 
 /** 单个模组的目录：{repo}/projects/{modId} */

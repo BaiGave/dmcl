@@ -5,11 +5,28 @@ import fs from "node:fs";
 import path from "node:path";
 import { killProcessTree } from "./gradle";
 import { cancelAllRunners, createGradleRunner, type GradleRunner } from "./gradle-runner";
-import { handleWorkspaceApi, initWorkspace } from "./workspace-api";
+import { cancelSourceJobs, handleWorkspaceApi, initWorkspace } from "./workspace-api";
+import { loadDist, repoDist } from "./dist-loader";
 import { cancelBuildQueue, onBuildEvent, getQueueStatus, variantJobLabel, type BuildEvent } from "./build-queue";
+
+const APP_DISPLAY_NAME = "DMCL";
+const APP_USER_MODEL_ID = "com.dmcl.workbench";
+
+if (process.platform === "win32") {
+  app.setAppUserModelId(APP_USER_MODEL_ID);
+}
+app.setName(APP_DISPLAY_NAME);
 
 const PORT = 19089;
 let mainWindow: BrowserWindow | null = null;
+
+async function packagedProjectsRoot(): Promise<string | undefined> {
+  if (!app.isPackaged) return undefined;
+  const { resolveDmclHome } = await loadDist<{ resolveDmclHome: (options?: { execPath?: string }) => string }>(
+    repoDist("core", "dmcl-home.js"),
+  );
+  return path.join(resolveDmclHome({ execPath: process.execPath }), "projects");
+}
 
 interface GenerateSession {
   cancelled: boolean;
@@ -49,6 +66,7 @@ function killActiveChild(): void {
   cancelAllGenerateSessions();
   void cancelAllRunners();
   cancelBuildQueue();
+  void cancelSourceJobs();
 }
 
 function parseGenerateArgs(args: string[]): Record<string, string> {
@@ -91,7 +109,7 @@ async function registerGeneratedMod(args: string[], success: boolean): Promise<v
       projectPath: path.resolve(parsed.dir),
       modVersion: "0.1.0",
       group: parsed.group ?? `com.example.${parsed.modid}`,
-      mappings: (parsed.mappings ?? "mojmap") as "yarn" | "mojmap" | "parchment",
+      mappings: (parsed.mappings ?? "mojmap") as "yarn" | "mojmap" | "parchment" | "mcp",
       buildStatus: success ? "success" : "failed",
       source: "dmcl",
     });
@@ -434,7 +452,12 @@ function createWindow(): void {
     title: "DMCL",
     show: false,
     backgroundColor: "#f6f8f6",
-    icon: path.join(__dirname, "assets", "brand", "dmcl-app-icon-256.png"),
+    icon: path.join(
+      __dirname,
+      "assets",
+      "brand",
+      process.platform === "win32" ? "dmcl-app-icon.ico" : "dmcl-app-icon-256.png",
+    ),
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "preload-bridge.js"),
@@ -455,11 +478,15 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
-  if (process.platform === "win32") app.setAppUserModelId("com.dmcl.workbench");
   const repoRoot = path.resolve(__dirname, "..");
   createServer(serveGui).listen(PORT, "127.0.0.1", () => {
     console.log(`GUI server: http://localhost:${PORT}`);
-    initWorkspace(repoRoot).catch(console.warn);
+    void packagedProjectsRoot()
+      .then((projectsRoot) => initWorkspace(repoRoot, projectsRoot))
+      .catch(async (err) => {
+        console.warn("packagedProjectsRoot failed, falling back to dev layout:", err);
+        await initWorkspace(repoRoot, undefined);
+      });
     createWindow();
   });
 });

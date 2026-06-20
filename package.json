@@ -1,8 +1,10 @@
 {
   "name": "dmcl",
+  "productName": "DMCL",
   "version": "0.1.0",
-  "description": "DMCL (Developer Minecraft Launcher) — Minecraft 模组开发环境一键搭建",
+  "description": "DMCL (Developer Minecraft Launcher) – Minecraft 模组开发环境一键搭建",
   "type": "module",
+  "main": "gui/main.js",
   "bin": {
     "dmcl": "dist/index.js"
   },
@@ -14,6 +16,8 @@
     "verify:all": "tsx src/index.ts --verify-all",
     "verify:all:force": "tsx src/index.ts --verify-all --verify-force",
     "renderer:extract": "node scripts/extract-renderer.mjs",
+    "tools:prepare": "node scripts/fetch-cfr.mjs",
+    "package:win": "npm run tools:prepare && npm run build && npm run gui:build && node scripts/package-win.mjs",
     "gui:bundle": "esbuild gui/renderer-src/main.ts --bundle --outfile=gui/renderer.js --format=iife --target=es2020",
     "gui:build": "tsc -p gui/tsconfig.json && npm run gui:bundle",
     "gui": "npm run build && npm run gui:build && node ./node_modules/electron/cli.js gui/main.js"
@@ -28,6 +32,7 @@
     "picocolors": "^1.1.1"
   },
   "devDependencies": {
+    "@electron/packager": "^20.0.1",
     "@types/adm-zip": "^0.5.8",
     "@types/node": "^25.9.2",
     "electron": "^42.4.0",

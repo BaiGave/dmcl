@@ -8,6 +8,7 @@ export interface WorkbenchState {
   selectedLoader: string;
   selectedMc: string;
   selectedMappings: string;
+  selectedSideLayout: string;
   modidTouched: boolean;
   groupTouched: boolean;
   generationCancelled: boolean;
@@ -39,6 +40,7 @@ export const state: WorkbenchState = {
   selectedLoader: "",
   selectedMc: "",
   selectedMappings: "",
+  selectedSideLayout: "unified",
   modidTouched: false,
   groupTouched: false,
   generationCancelled: false,

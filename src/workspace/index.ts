@@ -2,6 +2,7 @@ export * from "./types.js";
 export { WorkspaceStore, getWorkspace, getDmclDir, getLogsDir } from "./store.js";
 export {
   setRepoRoot,
+  setProjectsRoot,
   getRepoRoot,
   getProjectsRoot,
   getModDir,
