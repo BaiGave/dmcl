@@ -9,9 +9,8 @@ import { LOADER_LABELS, MAPPINGS_LABELS, DEFAULT_MAPPINGS, SIDE_LAYOUT_HINTS, SI
 import { resolveMappings } from "./meta/mappings-cache.js";
 import { supportedVersions } from "./meta/versions.js";
 import { applyChinaMirror } from "./core/mirror.js";
-import { ensureForgeMavenizerJdkCache } from "./core/forge-mavenizer.js";
+import { ensureProjectToolchain } from "./core/toolchain.js";
 import {
-  ensureProjectJdk,
   pickJdkMajor,
   readJavaHomeFromProject,
 } from "./core/jdk.js";
@@ -20,23 +19,23 @@ import { defaultSideLayout, parseSideLayout } from "./core/side-layout.js";
 import { runGradleBuild, runGradleClientVerify } from "./core/build.js";
 import {
   loadVersionVerificationPlan,
+  loadVersionVerificationContext,
   runAllVersionVerifications,
   runVersionVerificationBatch,
+  runVersionVerificationBatchParallel,
 } from "./workspace/version-verifier.js";
+import { defaultMatrixParallelism } from "./core/concurrency.js";
 
 const MOD_ID_RE = /^[a-z][a-z0-9_]{1,63}$/;
 const GROUP_RE = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/;
 
-/** 交互式 JDK 处理：按 Gradle / MC 版本选择兼容 JDK */
 async function handleJdkInteractive(opts: ProjectOptions, log: (msg: string) => void): Promise<void> {
-  await ensureProjectJdk(opts.targetDir, opts.mcVersion, log);
-  await ensureForgeMavenizerJdkCache(opts.targetDir, log);
+  await ensureProjectToolchain(opts.targetDir, opts.mcVersion, log);
 }
 
 /** 非交互模式 JDK 处理（GUI 场景不能问用户） */
 async function handleJdkNonInteractive(opts: ProjectOptions, log: (msg: string) => void): Promise<void> {
-  await ensureProjectJdk(opts.targetDir, opts.mcVersion, log);
-  await ensureForgeMavenizerJdkCache(opts.targetDir, log);
+  await ensureProjectToolchain(opts.targetDir, opts.mcVersion, log);
 }
 
 function printNextSteps(opts: ProjectOptions): void {
@@ -73,10 +72,14 @@ interface CliArgs {
   build?: boolean;
   "verify-versions"?: boolean;
   "verify-all"?: boolean;
+  "matrix-all"?: boolean;
   "verify-plan"?: boolean;
   "verify-limit"?: string;
   "verify-root"?: string;
   "verify-force"?: boolean;
+  parallel?: string;
+  "build-only"?: boolean;
+  "auto-fix"?: boolean;
   "keep-projects"?: boolean;
   yes?: boolean;
 }
@@ -96,10 +99,14 @@ function parseCli(): CliArgs {
       build: { type: "boolean" },
       "verify-versions": { type: "boolean" },
       "verify-all": { type: "boolean" },
+      "matrix-all": { type: "boolean" },
       "verify-plan": { type: "boolean" },
       "verify-limit": { type: "string" },
       "verify-root": { type: "string" },
       "verify-force": { type: "boolean" },
+      parallel: { type: "string" },
+      "build-only": { type: "boolean" },
+      "auto-fix": { type: "boolean" },
       "keep-projects": { type: "boolean" },
       yes: { type: "boolean", short: "y" },
     },
@@ -126,20 +133,36 @@ function parseLimit(raw: string | undefined): number | undefined {
   return n;
 }
 
+function parseParallel(raw: string | undefined, matrixAll: boolean): number | undefined {
+  if (raw) {
+    const n = Number.parseInt(raw, 10);
+    if (!Number.isFinite(n) || n < 1) bail(`parallel 需为正整数：${raw}`);
+    return n;
+  }
+  if (matrixAll) return defaultMatrixParallelism();
+  return undefined;
+}
+
 async function handleVersionVerification(args: CliArgs): Promise<void> {
+  const matrixAll = args["matrix-all"] === true;
+  const verifyAll = args["verify-all"] === true || matrixAll;
   const loader = parseLoader(args.loader);
   const limit = parseLimit(args["verify-limit"]);
+  const parallel = parseParallel(args.parallel, matrixAll);
   const opts = {
     loader,
     mcVersion: args.mc,
-    force: args["verify-force"] === true,
+    force: args["verify-force"] === true || matrixAll,
+    refreshMeta: matrixAll,
   };
 
   if (args["verify-plan"] && !args["verify-versions"]) {
-    const plan = await loadVersionVerificationPlan(opts);
-    const shown = plan.slice(0, limit ?? 30);
+    const ctx = await loadVersionVerificationContext(opts);
+    const shown = ctx.plan.slice(0, limit ?? 30);
     console.log(JSON.stringify({
-      planned: plan.length,
+      matrix: ctx.counts,
+      planned: ctx.plan.length,
+      skippedVerified: ctx.skippedVerified,
       shown: shown.length,
       targets: shown,
     }, null, 2));
@@ -148,21 +171,43 @@ async function handleVersionVerification(args: CliArgs): Promise<void> {
 
   const runOptions = {
     ...opts,
-    limit,
+    limit: verifyAll ? undefined : limit,
     rootDir: args["verify-root"],
     mirror: !args["no-mirror"],
-    keepProjects: args["keep-projects"] === true,
+    keepProjects: args["keep-projects"] === true || matrixAll,
+    parallel,
+    buildOnly: args["build-only"] === true,
+    autoFix: args["auto-fix"] === true || matrixAll,
   };
-  const result = args["verify-all"]
-    ? await runAllVersionVerifications(runOptions, (msg) => console.log(msg))
-    : await runVersionVerificationBatch(runOptions, (msg) => console.log(msg));
+
+  if (matrixAll) {
+    console.log(
+      `全矩阵验证：全部 loader×MC 组合（--matrix-all 默认 force，不跳过已验证项）`
+        + `，并行 ${runOptions.parallel ?? 1}，自动修复 ${runOptions.autoFix ? "开" : "关"}`,
+    );
+  }
+
+  const runner = verifyAll ? runAllVersionVerifications : runVersionVerificationBatch;
+  const result = parallel && parallel > 1
+    ? await runVersionVerificationBatchParallel(runOptions, (msg) => console.log(msg))
+    : await runner(runOptions, (msg) => console.log(msg));
+
+  const failures = result.results.filter((r) => r.status !== "verified");
+  if (failures.length > 0) {
+    console.log("\n========== 失败版本 ==========");
+    for (const item of failures) {
+      console.log(`✘ ${item.target.loader} ${item.target.mcVersion} — ${item.status}${item.failureSummary ? ` — ${item.failureSummary}` : ""}`);
+      if (item.logPath) console.log(`  日志：${item.logPath}`);
+    }
+  }
   console.log(JSON.stringify(result, null, 2));
+  if (failures.length > 0) process.exitCode = 1;
 }
 
 async function main(): Promise<void> {
   const args = parseCli();
 
-  if (args["verify-plan"] || args["verify-versions"] || args["verify-all"]) {
+  if (args["verify-plan"] || args["verify-versions"] || args["verify-all"] || args["matrix-all"]) {
     await handleVersionVerification(args);
     return;
   }

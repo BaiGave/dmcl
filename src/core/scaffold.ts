@@ -8,6 +8,7 @@ import { applyChinaMirror } from "./mirror.js";
 import { injectBuildscriptMirrors, injectMavenMirrors } from "./maven.js";
 import { writeCursorConfig } from "./vscode.js";
 import { applySideLayout } from "./side-layout.js";
+import { writeScaffoldMarker } from "./toolchain.js";
 
 export function pascalCase(input: string): string {
   const name = input
@@ -36,6 +37,7 @@ export async function scaffoldProject(opts: ProjectOptions, log: Logger): Promis
 
   await writeCursorConfig(opts.targetDir);
   log("已生成 Cursor / VS Code 配置（.vscode）");
+  await writeScaffoldMarker(opts.targetDir, opts.loader, opts.mcVersion);
   const git = spawnSync("git", ["init", "-q"], { cwd: opts.targetDir });
   if (git.status === 0) log("已初始化 git 仓库");
 }

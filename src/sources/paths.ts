@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { getIsolatedGradleHome } from "../core/gradle.js";
 import { getDmclHome } from "../core/dmcl-home.js";
 import type { LoaderId, MappingsId } from "../types.js";
 import type { MinecraftSourceEntry, MinecraftSourceManifest } from "./types.js";
@@ -22,9 +23,11 @@ export function getSourceJobsRoot(): string {
   return path.join(getDmclHome(), "temp", "source-jobs");
 }
 
-/** 独立 Gradle 用户目录，避免用户全局 init.d 脚本破坏历史 Gradle。 */
+/** 源码准备专用 Gradle 目录（与构建共用隔离根，避免用户 init.d 污染） */
 export function getSourceGradleHome(): string {
-  return path.join(getDmclHome(), "cache", "source-gradle");
+  const dir = path.join(getIsolatedGradleHome(), "sources");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 export function getMinecraftSourceUnitDir(

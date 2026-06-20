@@ -50,9 +50,7 @@ function implicitMojmapOption(label: string): MappingOption {
   return { id: "mojmap", label, available: true, implicit: true };
 }
 
-export async function resolveMappings(loader: LoaderId, mcVersion: string): Promise<MappingCacheEntry> {
-  const options: MappingOption[] = [];
-
+function buildDefaultMappingsEntry(loader: LoaderId, mcVersion: string): MappingCacheEntry {
   if (loader === "forge" && usesLegacyForgeMcp(mcVersion)) {
     return {
       loader,
@@ -78,6 +76,45 @@ export async function resolveMappings(loader: LoaderId, mcVersion: string): Prom
     };
   }
 
+  const options: MappingOption[] = [implicitMojmapOption("官方默认")];
+  if (loader === "fabric") {
+    options.unshift({
+      id: "yarn",
+      label: "Yarn",
+      available: false,
+    });
+  } else {
+    options.unshift({
+      id: "parchment",
+      label: "Parchment",
+      available: false,
+    });
+  }
+
+  return {
+    loader,
+    mcVersion,
+    options,
+    default: loader === "fabric" ? "mojmap" : "mojmap",
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+/** 不联网，立即返回可用默认项（供 UI 首屏展示） */
+export function resolveMappingsQuick(loader: LoaderId, mcVersion: string): MappingCacheEntry {
+  return buildDefaultMappingsEntry(loader, mcVersion);
+}
+
+export async function resolveMappings(loader: LoaderId, mcVersion: string): Promise<MappingCacheEntry> {
+  if (loader === "forge" && usesLegacyForgeMcp(mcVersion)) {
+    return buildDefaultMappingsEntry(loader, mcVersion);
+  }
+
+  if (loader === "fabric" && isUnobfuscatedMc(mcVersion)) {
+    return buildDefaultMappingsEntry(loader, mcVersion);
+  }
+
+  const options: MappingOption[] = [];
   for (const id of MAPPINGS_PROBE[loader]) {
     if (id === "yarn") {
       const version = await fetchYarnVersion(mcVersion);
@@ -99,12 +136,7 @@ export async function resolveMappings(loader: LoaderId, mcVersion: string): Prom
   } else if (options.length > 0) {
     defaultId = options[0].id;
   } else {
-    options.push({
-      id: "mojmap",
-      label: "官方默认",
-      available: true,
-      implicit: true,
-    });
+    options.push(implicitMojmapOption("官方默认"));
     defaultId = "mojmap";
   }
 
@@ -185,8 +217,11 @@ export class MappingsCache {
     return task;
   }
 
-  /** 优先返回本地缓存；过期则在后台刷新 */
-  async getOrFetch(loader: LoaderId, mcVersion: string): Promise<{ entry: MappingCacheEntry; fromCache: boolean }> {
+  /** 优先返回本地缓存；缺失时先给默认可选项并在后台探测 */
+  async getOrFetch(
+    loader: LoaderId,
+    mcVersion: string,
+  ): Promise<{ entry: MappingCacheEntry; fromCache: boolean; pending?: boolean }> {
     const existing = this.getEntry(loader, mcVersion);
 
     if (existing && !this.isIncomplete(existing)) {
@@ -196,16 +231,13 @@ export class MappingsCache {
     }
 
     if (existing && this.isIncomplete(existing)) {
-      try {
-        const entry = await this.refresh(loader, mcVersion);
-        return { entry, fromCache: false };
-      } catch {
-        return { entry: existing, fromCache: true };
-      }
+      void this.refresh(loader, mcVersion).catch(() => {});
+      return { entry: existing, fromCache: true, pending: true };
     }
 
-    const entry = await this.refresh(loader, mcVersion);
-    return { entry, fromCache: false };
+    const quick = resolveMappingsQuick(loader, mcVersion);
+    void this.refresh(loader, mcVersion).catch(() => {});
+    return { entry: quick, fromCache: false, pending: true };
   }
 
   async prefetch(

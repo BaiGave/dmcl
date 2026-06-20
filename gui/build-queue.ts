@@ -94,6 +94,19 @@ async function updateVariantStatus(variantId: string, status: BuildStatus): Prom
 }
 
 function summarizeFailure(lines: string[]): string | undefined {
+  const text = lines.join("\n");
+  if (/JDK 准备失败|org\.gradle\.java\.home|需要 Java \d+|incompatibleReason/i.test(text)) {
+    const jdk = [...lines].reverse().find((line) =>
+      /JDK|Java \d+|org\.gradle\.java\.home/i.test(line),
+    );
+    if (jdk) return jdk.slice(0, 240);
+  }
+  if (/Timeout waiting to lock|Could not acquire lock|Gradle build daemon|文件锁|file lock/i.test(text)) {
+    return "Gradle 缓存文件锁争用（大批量并行构建时常见，可在设置中降低「Gradle 构建并发」后重试）";
+  }
+  if (/OutOfMemoryError|GC overhead|内存不足|insufficient memory/i.test(text)) {
+    return "构建进程内存不足（大批量并行时常见，请降低 Gradle 构建并发或任务槽位数）";
+  }
   const hit = [...lines].reverse().find((line) =>
     /BUILD FAILED|FAILURE|Exception|Error|Cannot|Could not/i.test(line)
   );

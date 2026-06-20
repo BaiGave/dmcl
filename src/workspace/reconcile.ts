@@ -11,7 +11,7 @@ export interface ReconcileResult {
 /** 从磁盘重新扫描；文件夹已删除的模组会自动消失 */
 export function reconcileWorkspace(store: WorkspaceStore): ReconcileResult {
   const before = store.getMods().length;
-  store.refresh();
+  store.refresh({ force: true });
   const after = store.getMods().length;
   return {
     checked: before,

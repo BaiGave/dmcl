@@ -46,6 +46,7 @@ const gradle_runner_1 = require("./gradle-runner");
 const workspace_api_1 = require("./workspace-api");
 const dist_loader_1 = require("./dist-loader");
 const build_queue_1 = require("./build-queue");
+const variant_batch_job_1 = require("./variant-batch-job");
 const APP_DISPLAY_NAME = "DMCL";
 const APP_USER_MODEL_ID = "com.dmcl.workbench";
 if (process.platform === "win32") {
@@ -104,16 +105,19 @@ async function registerGeneratedMod(args, success) {
         const { ws } = await Promise.resolve().then(() => __importStar(require("./workspace-api")));
         const mod = await ws();
         const store = mod.getWorkspace();
+        const projectPath = node_path_1.default.resolve(parsed.dir);
+        store.prepareVariantRegistration(projectPath);
         let m = store.findModByModId(parsed.modid);
         if (!m) {
-            const modDir = mod.inferModDir(node_path_1.default.resolve(parsed.dir), parsed.modid);
+            const modDir = mod.inferModDir(projectPath, parsed.modid);
             m = store.createMod({
                 modId: parsed.modid,
                 displayName: parsed.name ?? parsed.modid,
                 modDir,
             });
         }
-        store.refresh();
+        store.refresh({ force: true });
+        m = store.findModByModId(parsed.modid) ?? m;
         const existing = store.findVariantByPath(parsed.dir);
         if (existing) {
             store.updateVariantBuildStatus(existing.variant.id, success ? "success" : "failed");
@@ -122,7 +126,7 @@ async function registerGeneratedMod(args, success) {
         store.addVariant(m.id, {
             loader: (parsed.loader ?? "fabric"),
             mcVersion: parsed.mc ?? "1.21.4",
-            projectPath: node_path_1.default.resolve(parsed.dir),
+            projectPath,
             modVersion: "0.1.0",
             group: parsed.group ?? `com.example.${parsed.modid}`,
             mappings: (parsed.mappings ?? "mojmap"),
@@ -475,10 +479,14 @@ electron_1.app.whenReady().then(() => {
     (0, node_http_1.createServer)(serveGui).listen(PORT, "127.0.0.1", () => {
         console.log(`GUI server: http://localhost:${PORT}`);
         void packagedProjectsRoot()
-            .then((projectsRoot) => (0, workspace_api_1.initWorkspace)(repoRoot, projectsRoot))
+            .then(async (projectsRoot) => {
+            await (0, workspace_api_1.initWorkspace)(repoRoot, projectsRoot);
+            await (0, variant_batch_job_1.resumeVariantBatchJobs)();
+        })
             .catch(async (err) => {
             console.warn("packagedProjectsRoot failed, falling back to dev layout:", err);
             await (0, workspace_api_1.initWorkspace)(repoRoot, undefined);
+            await (0, variant_batch_job_1.resumeVariantBatchJobs)();
         });
         createWindow();
     });

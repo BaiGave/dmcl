@@ -1,3 +1,4 @@
+import type { ChildProcess } from "node:child_process";
 import type { Logger } from "../types.js";
 import {
   attachLineStream,
@@ -11,6 +12,8 @@ import {
 
 export interface GradleCommandLogOptions {
   onRawLine?: Logger;
+  isCancelled?: () => boolean;
+  onProc?: (proc: ChildProcess, isWin: boolean) => void;
 }
 
 /**
@@ -30,10 +33,14 @@ export async function runGradleBuild(
   log("运行首次构建（gradlew build）…");
   log("这会下载并反编译 Minecraft，可能需要 5~20 分钟");
 
+  const gradleOpts = {
+    isCancelled: options.isCancelled,
+    onProc: options.onProc,
+  };
   const code = await runGradleBuildTask(targetDir, (line) => {
     options.onRawLine?.(line);
     if (shouldEmitGradleLine(line)) log(line.substring(0, 240));
-  });
+  }, gradleOpts);
 
   const ok = code === 0;
   log(ok ? "构建成功！" : `构建失败 (exit ${code})`);
@@ -56,7 +63,11 @@ export async function runGradleBuildDiagnostics(
   const code = await runGradleBuildTask(targetDir, (line) => {
     options.onRawLine?.(line);
     if (shouldEmitGradleLine(line)) log(line.substring(0, 240));
-  }, { tasks: ["build", "--stacktrace", "--info", "--no-daemon"] });
+  }, {
+    tasks: ["build", "--stacktrace", "--info", "--no-daemon"],
+    isCancelled: options.isCancelled,
+    onProc: options.onProc,
+  });
 
   log(code === 0 ? "Diagnostic build succeeded" : `Diagnostic build failed (exit ${code})`);
   return code;
@@ -81,7 +92,11 @@ export async function runGradleClientVerify(
     if (shouldEmitGradleLine(line)) {
       log(line.substring(0, 120));
     }
-  }, { mode: "verify" });
+  }, {
+    mode: "verify",
+    isCancelled: options.isCancelled,
+    onProc: options.onProc,
+  });
 
   const ok = code === 0;
   log(ok ? "客户端验证通过！" : "客户端验证失败");

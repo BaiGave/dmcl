@@ -79,12 +79,18 @@ export function detectConcurrencyInfo(): ConcurrencyInfo {
 }
 
 /** Gradle 缓存锁争用：高核数机器上限制同时 build 数，避免全员等锁 */
-const GRADLE_BUILD_CAP = 12;
+const GRADLE_BUILD_CAP = 6;
+
+/** 推荐 Gradle 并行构建数：约为物理核数一半，且不超过 GRADLE_BUILD_CAP */
+export function recommendGradleBuildConcurrency(physicalCores: number): number {
+  const half = Math.max(1, Math.ceil(physicalCores / 2));
+  return Math.max(1, Math.min(physicalCores, GRADLE_BUILD_CAP, half));
+}
 
 export function detectConcurrencyLimits(): ConcurrencyLimits {
   const base = detectConcurrencyInfo();
   const physical = base.physicalCores;
-  const gradleBuildConcurrency = Math.min(physical, GRADLE_BUILD_CAP);
+  const gradleBuildConcurrency = recommendGradleBuildConcurrency(physical);
   const clientConcurrency = physical >= 8 ? 2 : 1;
   return {
     ...base,

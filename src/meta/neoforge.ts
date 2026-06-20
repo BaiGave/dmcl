@@ -12,11 +12,17 @@ export async function fetchNeoForgeVersionsRaw(): Promise<string[]> {
   return data.versions;
 }
 
+/**
+ * NeoForge 版本前缀：旧版 MC 1.21.11 → 21.11；新版 calver MC 26.1 → 26.1.0（见 NeoForge versioning 文档）。
+ */
 export function neoPrefixFor(mcVersion: string): string {
   if (mcVersion.startsWith("1.")) {
     const rest = mcVersion.slice(2);
     return rest.includes(".") ? rest : `${rest}.0`;
   }
+  const parts = mcVersion.split(".");
+  // MC 26.1 / 26.2 等省略 patch 的 calver 版本 → NeoForge 26.1.0.x / 26.2.0.x
+  if (parts.length === 2) return `${mcVersion}.0`;
   return mcVersion;
 }
 
@@ -27,7 +33,7 @@ export function pickNeoForgeVersion(versions: string[], mcVersion: string): stri
     (v) => v.startsWith(`${prefix}.`) && v.split(".").length === expectedSegments,
   );
   if (matches.length === 0) return null;
-  const stable = matches.filter((v) => !/-(beta|alpha|rc)/.test(v));
+  const stable = matches.filter((v) => !/-(beta|alpha|rc|snapshot)/i.test(v));
   const pool = stable.length > 0 ? stable : matches;
   return pool[pool.length - 1];
 }
@@ -48,19 +54,27 @@ export function neoMdkZipCandidates(mcVersion: string): string[] {
   const family = neoMdkTemplateFamily(mcVersion);
   const repos = [`MDK-${mcVersion}-${family}`];
   const parts = mcVersion.split(".");
+  if (parts.length === 2 && !mcVersion.startsWith("1.")) {
+    repos.push(`MDK-${mcVersion}.0-${family}`, `MDK-${mcVersion}.2-${family}`);
+  }
   if (parts.length === 3 && family === "ModDevGradle") {
     repos.push(`MDK-${parts[0]}.${parts[1]}-ModDevGradle`);
   }
-  return repos.flatMap(mdkBranchZips);
+  return [...new Set(repos)].flatMap(mdkBranchZips);
 }
 
 export function neoMdkFallbackCandidates(mcVersion: string): string[] {
   const parts = mcVersion.split(".");
+  const family = neoMdkTemplateFamily(mcVersion);
+  if (parts.length === 2 && !mcVersion.startsWith("1.")) {
+    return [0, 1, 2, 3].flatMap((p) =>
+      mdkBranchZips(`MDK-${parts[0]}.${parts[1]}.${p}-${family}`),
+    );
+  }
   if (parts.length < 3) return [];
   const patch = Number.parseInt(parts[2], 10);
   if (Number.isNaN(patch)) return [];
   const minor = `${parts[0]}.${parts[1]}`;
-  const family = neoMdkTemplateFamily(mcVersion);
   const nearbyPatches = family === "NeoGradle"
     ? [patch - 1, patch + 1, patch - 2, patch + 2].filter((value) => value >= 0)
     : [patch + 1, patch + 2];

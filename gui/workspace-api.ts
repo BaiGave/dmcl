@@ -12,6 +12,15 @@ import {
   listLogs,
   readLog,
 } from "./build-queue";
+import {
+  cancelVariantBatchJob,
+  ensureBatchJobsDir,
+  getActiveVariantBatchJob,
+  getVariantBatchJob,
+  resumeVariantBatchJobs,
+  startVariantBatchJob,
+} from "./variant-batch-job";
+import { withModVariantGenLock } from "./mod-gen-lock";
 import { loadDist, repoDist } from "./dist-loader";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -42,6 +51,13 @@ interface WsVariant {
   buildStatus?: string;
 }
 
+type ManagedMod = {
+  id: string;
+  modId: string;
+  displayName: string;
+  variants: WsVariant[];
+};
+
 interface VersionVerificationApiRecord {
   lastResultAt?: string;
 }
@@ -55,6 +71,29 @@ function parseLimitParam(value: string | null | undefined): number | undefined {
   if (!value) return undefined;
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function resolveManagedMod(
+  store: {
+    refresh: (opts?: { force?: boolean }) => void;
+    getMod: (id: string) => unknown;
+    findModByModId: (id: string, preferredModDir?: string) => unknown;
+    resolveMod: (id: string, projectPath?: string) => unknown;
+  },
+  modModule: WorkspaceModule,
+  modKey: string,
+  hints?: { modId?: string; projectPath?: string },
+): unknown {
+  store.refresh({ force: true });
+  let m = store.getMod(modKey) ?? store.findModByModId(modKey);
+  if (!m) m = modModule.findModOnDisk(store, modKey);
+  if (!m && hints?.projectPath) m = store.resolveMod(modKey, hints.projectPath);
+  if (!m && hints?.modId) m = store.findModByModId(hints.modId);
+  if (m) {
+    store.refresh({ force: true });
+    m = store.getMod((m as { id: string }).id) ?? m;
+  }
+  return m;
 }
 
 function compareMcVersion(a: string, b: string): number {
@@ -162,7 +201,8 @@ export async function handleWorkspaceApi(
 
   // GET /api/mods
   if (urlPath === "/api/mods" && method === "GET") {
-    store.refresh();
+    const q = new URL(req.url ?? "/", "http://localhost").searchParams;
+    store.refresh({ force: q.get("force") === "1" || q.get("force") === "true" });
     json(res, { mods: store.getMods() });
     return true;
   }
@@ -188,6 +228,27 @@ export async function handleWorkspaceApi(
     return true;
   }
 
+  // GET /api/toolchain?loader=fabric&mcVersion=1.21.1[&projectPath=...]
+  if (urlPath.startsWith("/api/toolchain") && method === "GET") {
+    const q = new URL(urlPath, "http://localhost").searchParams;
+    const loader = parseLoaderParam(q.get("loader"));
+    const mcVersion = (q.get("mcVersion") ?? q.get("mc") ?? "").trim();
+    const projectPath = (q.get("projectPath") ?? "").trim();
+    if (projectPath) {
+      const { resolveProjectToolchain } = await loadDist(repoDist("core", "toolchain.js"));
+      const profile = resolveProjectToolchain(projectPath, mcVersion || undefined);
+      json(res, profile ?? { error: "无法解析项目工具链" }, profile ? 200 : 404);
+      return true;
+    }
+    if (!loader || !mcVersion) {
+      json(res, { error: "缺少 loader 或 mcVersion" }, 400);
+      return true;
+    }
+    const { resolveVersionToolchain } = await loadDist(repoDist("core", "toolchain.js"));
+    json(res, resolveVersionToolchain(loader, mcVersion));
+    return true;
+  }
+
   // GET /api/paths/info
   if (urlPath === "/api/paths/info" && method === "GET") {
     json(res, {
@@ -202,6 +263,74 @@ export async function handleWorkspaceApi(
     const { getConcurrencySettingsPayload } = await import("./concurrency-settings");
     const { getGovernorStatus } = await import("./concurrency-governor");
     json(res, { ...getConcurrencySettingsPayload(), ...getGovernorStatus() });
+    return true;
+  }
+
+  // POST /api/verify-project — 对已生成项目执行构建/客户端验证（流式输出）
+  if (urlPath === "/api/verify-project" && method === "POST") {
+    const body = (await readBody(req)) as {
+      projectPath?: string;
+      variantId?: string;
+      buildOnly?: boolean;
+    };
+    const projectPath = body.projectPath ? path.resolve(body.projectPath) : "";
+    if (!projectPath || !fs.existsSync(projectPath)) {
+      json(res, { error: "项目路径无效或不存在" }, 400);
+      return true;
+    }
+    const linked = store.findVariantByPath(projectPath);
+    const projectsRoot = path.resolve(mod.getProjectsRoot());
+    const allowed = linked
+      || (projectPath.startsWith(projectsRoot + path.sep) || projectPath === projectsRoot);
+    if (!allowed) {
+      json(res, { error: "路径不在工作区允许范围内" }, 403);
+      return true;
+    }
+
+    const variantId = body.variantId ?? linked?.variant.id;
+    const detected = linked ? undefined : mod.detectProject(projectPath);
+    const loader = (linked?.variant.loader ?? detected?.loader) as
+      "fabric" | "forge" | "neoforge" | undefined;
+    const mcVersion = linked?.variant.mcVersion ?? detected?.mcVersion;
+    if (!loader || !mcVersion) {
+      json(res, { error: "无法推断加载器或 Minecraft 版本" }, 400);
+      return true;
+    }
+    if (variantId) store.updateVariantBuildStatus(variantId, "building");
+
+    res.writeHead(200, {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Transfer-Encoding": "chunked",
+    });
+
+    const log = (msg: string) => {
+      if (!res.writableEnded) res.write(msg + "\n");
+    };
+
+    try {
+      const result = await mod.verifyExistingProject(projectPath, loader, mcVersion, {
+        buildOnly: body.buildOnly === true,
+        autoFix: true,
+        buildRetries: 2,
+        gradleSlots: 1,
+        log,
+      });
+      if (variantId) {
+        store.updateVariantBuildStatus(variantId, result.success ? "success" : "failed");
+      }
+      if (result.success) {
+        log(body.buildOnly ? "✔ 构建验证通过" : "✔ 验证完成");
+        res.write("__EXIT__:0\n");
+      } else {
+        log(`错误：${result.failureSummary || "验证失败"}`);
+        res.write("__EXIT__:1\n");
+      }
+    } catch (err) {
+      if (variantId) store.updateVariantBuildStatus(variantId, "failed");
+      log(`错误：${(err as Error).message}`);
+      res.write("__EXIT__:1\n");
+    }
+    res.end();
     return true;
   }
 
@@ -266,25 +395,58 @@ export async function handleWorkspaceApi(
     const m = store.getMod(modMatch[1]);
     if (!m) { json(res, { error: "模组不存在" }, 404); return true; }
 
+    const wantsProgress = deleteFiles && m.variants.length > 1;
     let fileResult: { deleted: string[]; skipped: string[] } | undefined;
+
     if (deleteFiles) {
-      const deletedOnDisk = await mod.deleteModProjects(
-        m.modId,
-        m.variants.map((v: WsVariant) => v.projectPath),
-      );
-      fileResult = deletedOnDisk;
-      if (deletedOnDisk.skipped.length > 0) {
-        json(res, {
-          error: `有 ${deletedOnDisk.skipped.length} 个项目目录未能删除，请关闭占用程序后重试`,
-          fileResult: deletedOnDisk,
-        }, 500);
-        return true;
+      if (wantsProgress) {
+        res.writeHead(200, {
+          "Content-Type": "application/x-ndjson; charset=utf-8",
+          "Transfer-Encoding": "chunked",
+          "X-Content-Type-Options": "nosniff",
+        });
+        const paths = m.variants.map((v: WsVariant) => v.projectPath);
+        fileResult = await mod.deleteModProjects(
+          m.modId,
+          paths,
+          (done: number, total: number, p: string) => {
+            res.write(JSON.stringify({ type: "progress", done, total, path: p }) + "\n");
+          },
+        );
+        if (fileResult!.skipped.length > 0) {
+          res.write(JSON.stringify({
+            type: "error",
+            error: `有 ${fileResult!.skipped.length} 个项目目录未能删除，请关闭占用程序后重试`,
+            fileResult,
+          }) + "\n");
+          res.end();
+          return true;
+        }
+      } else {
+        const deletedOnDisk = await mod.deleteModProjects(
+          m.modId,
+          m.variants.map((v: WsVariant) => v.projectPath),
+        );
+        fileResult = deletedOnDisk;
+        if (deletedOnDisk.skipped.length > 0) {
+          json(res, {
+            error: `有 ${deletedOnDisk.skipped.length} 个项目目录未能删除，请关闭占用程序后重试`,
+            fileResult: deletedOnDisk,
+          }, 500);
+          return true;
+        }
       }
     }
 
     const ok = store.removeMod(modMatch[1]);
     mod.invalidateMatrixCache(m.modId);
-    json(res, { ok, deleteFiles, fileResult, mods: store.getMods() });
+    const payload = { ok, deleteFiles, fileResult, mods: store.getMods() };
+    if (wantsProgress) {
+      res.write(JSON.stringify({ type: "done", ...payload }) + "\n");
+      res.end();
+    } else {
+      json(res, payload);
+    }
     return true;
   }
 
@@ -331,16 +493,47 @@ export async function handleWorkspaceApi(
       sourceVariantId: string;
       targetLoader: string;
       targetMc: string;
+      modId?: string;
       parentDir?: string;
       mirror?: boolean;
       autoBuild?: boolean;
     };
 
-    const m = store.getMod(variantPostMatch[1]);
-    if (!m) { json(res, { error: "模组不存在" }, 404); return true; }
+    const modKey = decodeURIComponent(variantPostMatch[1]);
+    let hintPath: string | undefined;
+    if (body.modId && mod.isValidModId(body.modId)) {
+      try {
+        hintPath = mod.defaultVariantPath(
+          body.modId,
+          body.targetLoader as "fabric" | "forge" | "neoforge",
+          body.targetMc,
+        );
+      } catch { /* ignore */ }
+    }
+    const m = resolveManagedMod(store, mod, modKey, {
+      modId: body.modId,
+      projectPath: hintPath,
+    }) as ReturnType<typeof store.getMod>;
+    if (!m) {
+      json(res, {
+        error: "工作区未找到该模组，请关闭弹窗后刷新模组列表再试",
+        modKey,
+        modId: body.modId,
+      }, 404);
+      return true;
+    }
 
-    const source = m.variants.find((v: WsVariant) => v.id === body.sourceVariantId);
-    if (!source) { json(res, { error: "源变体不存在" }, 404); return true; }
+    let source = m.variants.find((v: WsVariant) => v.id === body.sourceVariantId);
+    if (!source) {
+      const onDisk = mod.findVariantOnDisk(store, body.sourceVariantId);
+      if (onDisk && (onDisk.mod.id === m.id || onDisk.mod.modId === m.modId)) {
+        source = onDisk.variant;
+      }
+    }
+    if (!source) {
+      json(res, { error: `源变体不存在：${body.sourceVariantId ?? ""}` }, 400);
+      return true;
+    }
 
     res.writeHead(200, {
       "Content-Type": "text/plain; charset=utf-8",
@@ -354,13 +547,13 @@ export async function handleWorkspaceApi(
     };
 
     try {
-      const variant = await mod.generateVariant({
+      const variant = await withModVariantGenLock(m.id, () => mod.generateVariant({
         mod: m,
         sourceVariant: source,
         targetLoader: body.targetLoader as "fabric" | "forge" | "neoforge",
         targetMc: body.targetMc,
         mirror: body.mirror !== false,
-      }, log);
+      }, log)) as WsVariant;
 
       if (body.autoBuild) {
         store.updateVariantBuildStatus(variant.id, "building");
@@ -381,6 +574,72 @@ export async function handleWorkspaceApi(
       res.write("__EXIT__:1\n");
     }
     res.end();
+    return true;
+  }
+
+  // POST /api/mods/:id/variants/batch — 服务端持久化批任务（支持 100+）
+  const variantBatchMatch = urlPath.match(/^\/api\/mods\/([^/]+)\/variants\/batch$/);
+  if (variantBatchMatch && method === "POST") {
+    const body = (await readBody(req)) as {
+      sourceVariantId?: string;
+      targets?: Array<{ loader: string; mcVersion: string }>;
+      buildOnly?: boolean;
+      mirror?: boolean;
+      modName?: string;
+    };
+    const modUuid = decodeURIComponent(variantBatchMatch[1]);
+    store.refresh({ force: true });
+    const m = store.getMod(modUuid) as ManagedMod | undefined;
+    if (!m) { json(res, { error: "模组不存在" }, 404); return true; }
+
+    const targets = body.targets ?? [];
+    if (!targets.length) { json(res, { error: "缺少 targets" }, 400); return true; }
+
+    let sourceId = body.sourceVariantId;
+    if (!sourceId) {
+      sourceId = m.variants[0]?.id;
+    }
+    if (!sourceId) { json(res, { error: "请先至少有一个变体作为源码来源" }, 400); return true; }
+
+    try {
+      const job = await startVariantBatchJob({
+        modUuid: m.id,
+        modName: body.modName ?? m.displayName,
+        sourceVariantId: sourceId,
+        targets,
+        buildOnly: body.buildOnly !== false,
+        mirror: body.mirror !== false,
+      });
+      json(res, { ok: true, job }, 202);
+    } catch (err) {
+      json(res, { error: (err as Error).message }, 409);
+    }
+    return true;
+  }
+
+  // GET /api/batch-jobs/active
+  if (urlPath === "/api/batch-jobs/active" && method === "GET") {
+    await ensureBatchJobsDir();
+    json(res, { job: getActiveVariantBatchJob() });
+    return true;
+  }
+
+  // GET /api/batch-jobs/:id
+  const batchJobMatch = urlPath.match(/^\/api\/batch-jobs\/([^/]+)$/);
+  if (batchJobMatch && method === "GET") {
+    await ensureBatchJobsDir();
+    const job = getVariantBatchJob(decodeURIComponent(batchJobMatch[1]));
+    if (!job) { json(res, { error: "任务不存在" }, 404); return true; }
+    json(res, { job });
+    return true;
+  }
+
+  // POST /api/batch-jobs/:id/cancel
+  const batchCancelMatch = urlPath.match(/^\/api\/batch-jobs\/([^/]+)\/cancel$/);
+  if (batchCancelMatch && method === "POST") {
+    const job = cancelVariantBatchJob(decodeURIComponent(batchCancelMatch[1]));
+    if (!job) { json(res, { error: "任务不存在" }, 404); return true; }
+    json(res, { ok: true, job });
     return true;
   }
 
@@ -469,7 +728,9 @@ export async function handleWorkspaceApi(
     let m = store.findModByModId(body.modId);
     if (!m) {
       try {
-        const modDir = mod.inferModDir(path.resolve(body.projectPath), body.modId);
+        const projectPath = path.resolve(body.projectPath);
+        store.prepareVariantRegistration(projectPath);
+        const modDir = mod.inferModDir(projectPath, body.modId);
         m = store.createMod({
           modId: body.modId,
           displayName: body.displayName,
@@ -479,7 +740,12 @@ export async function handleWorkspaceApi(
         json(res, { error: (err as Error).message }, 400);
         return true;
       }
+    } else {
+      store.prepareVariantRegistration(body.projectPath);
     }
+
+    store.refresh({ force: true });
+    m = store.findModByModId(body.modId) ?? m;
 
     const existing = store.findVariantByPath(body.projectPath);
     if (existing) {
@@ -732,8 +998,8 @@ export async function handleWorkspaceApi(
       includeMissingLoaders?: boolean;
     };
     store.refresh({ force: true });
-    const m = store.getMod(buildAllMatch[1]);
-    if (!m) { json(res, { error: "模组不存在" }, 404); return true; }
+    const m = resolveManagedMod(store, mod, buildAllMatch[1]) as ReturnType<typeof store.getMod>;
+    if (!m) { json(res, { error: "工作区未找到该模组，请刷新模组列表后重试" }, 404); return true; }
 
     const { buildable, skipped } = pickBuildableVariants(m.variants as WsVariant[], {
       loader: body.loader,
@@ -807,7 +1073,7 @@ export async function handleWorkspaceApi(
       json(res, { error: "未知加载器" }, 400);
       return true;
     }
-    const { data, fromCache, stale } = await getMetaCache().get();
+    const { data, fromCache, stale } = await getMetaCache().get({ strategy: "cache-first" });
     json(res, { loader, versions: data.loaderVersions[loader] ?? [], fromCache, stale, updatedAt: data.updatedAt });
     return true;
   }
@@ -874,16 +1140,20 @@ export async function handleWorkspaceApi(
       mcVersion?: string;
       limit?: number;
       force?: boolean;
+      refreshMeta?: boolean;
       rootDir?: string;
       mirror?: boolean;
       keepProjects?: boolean;
+      parallel?: number;
+      buildOnly?: boolean;
+      autoFix?: boolean;
     };
     const loader = parseLoaderParam(body.loader);
     if (body.loader && !loader) {
       json(res, { error: "未知加载器" }, 400);
       return true;
     }
-    const { runAllVersionVerifications, runVersionVerificationBatch } = await loadDist(
+    const { runAllVersionVerifications, runVersionVerificationBatchParallel } = await loadDist(
       repoDist("workspace", "version-verifier.js"),
     );
     try {
@@ -891,14 +1161,18 @@ export async function handleWorkspaceApi(
         loader,
         mcVersion: body.mcVersion,
         limit: body.limit,
-        force: body.force === true,
+        force: body.force === true || urlPath === "/api/verification/run-all",
+        refreshMeta: body.refreshMeta === true || urlPath === "/api/verification/run-all",
         rootDir: body.rootDir,
         mirror: body.mirror !== false,
         keepProjects: body.keepProjects === true,
+        parallel: body.parallel,
+        buildOnly: body.buildOnly === true,
+        autoFix: body.autoFix === true,
       };
       const result = urlPath === "/api/verification/run-all"
         ? await runAllVersionVerifications(options)
-        : await runVersionVerificationBatch(options);
+        : await runVersionVerificationBatchParallel(options);
       json(res, result);
     } catch (err) {
       json(res, { error: (err as Error).message }, 500);
@@ -906,17 +1180,26 @@ export async function handleWorkspaceApi(
     return true;
   }
 
-  // POST /api/meta/refresh — 手动刷新元数据缓存（同步等待完成）
+  // POST /api/meta/refresh — 增量刷新（force=1 时为设置页全量刷新）
   if (urlPath === "/api/meta/refresh" && method === "POST") {
     const { getMetaCache } = await loadDist(repoDist("meta", "meta-cache.js"));
     const { invalidateMatrixCache } = await loadDist(repoDist("workspace", "matrix.js"));
+    const body = (await readBody(req)) as { force?: boolean | string | number };
+    const force = body?.force === true || body?.force === "true" || body?.force === 1;
     try {
-      const data = await getMetaCache().refresh();
+      const result = await getMetaCache().refreshDetailed({ force });
       invalidateMatrixCache();
       json(res, {
         ok: true,
-        updatedAt: data.updatedAt,
-        loaderVersions: data.loaderVersions,
+        mode: result.mode,
+        newReleaseCount: result.newReleaseCount,
+        forgeMdkProbeCount: result.forgeMdkProbeCount,
+        loadersRefreshed: ["fabric", "forge", "neoforge"],
+        note: force
+          ? "已重拉全部上游元数据并重探全部 Forge MDK"
+          : "已重拉 Fabric / Forge / NeoForge 上游元数据；Forge 仅增量 MDK 探测，映射表仅为新增版本预取",
+        updatedAt: result.data.updatedAt,
+        loaderVersions: result.data.loaderVersions,
       });
     } catch (err) {
       json(res, { error: `刷新失败：${(err as Error).message}` }, 500);
@@ -970,7 +1253,7 @@ export async function handleWorkspaceApi(
     }
     const { getMetaCache } = await loadDist(repoDist("meta", "meta-cache.js"));
     const { getMappingsCache } = await loadDist(repoDist("meta", "mappings-cache.js"));
-    const { data } = await getMetaCache().get();
+    const { data } = await getMetaCache().get({ strategy: "cache-first" });
     const versions = data.loaderVersions[loader] ?? [];
     const result = await getMappingsCache().prefetch({ [loader]: versions } as Record<"fabric" | "forge" | "neoforge", string[]>);
     json(res, { ok: true, loader, versionCount: versions.length, ...result });
@@ -999,7 +1282,7 @@ export async function handleWorkspaceApi(
       return true;
     }
     const { getMappingsCache, MAPPINGS_CACHE_FILE } = await loadDist(repoDist("meta", "mappings-cache.js"));
-    const { entry, fromCache } = await getMappingsCache().getOrFetch(loader, mcVersion);
+    const { entry, fromCache, pending } = await getMappingsCache().getOrFetch(loader, mcVersion);
     json(res, {
       loader,
       mcVersion,
@@ -1007,6 +1290,7 @@ export async function handleWorkspaceApi(
       default: entry.default,
       updatedAt: entry.updatedAt,
       fromCache,
+      pending: pending === true,
       cacheFile: MAPPINGS_CACHE_FILE,
     });
     return true;

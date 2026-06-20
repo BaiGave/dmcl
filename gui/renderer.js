@@ -294,6 +294,24 @@
   });
 
   // gui/renderer-src/api.ts
+  async function fetchWithRetry(path, opts = {}) {
+    var retries = opts.retries ?? 3;
+    var delayMs = opts.retryDelayMs ?? 800;
+    var lastErr;
+    for (var attempt = 0; attempt <= retries; attempt++) {
+      try {
+        return await fetch(path, opts);
+      } catch (err) {
+        lastErr = err;
+        if (attempt >= retries) break;
+        await new Promise(function(r) {
+          setTimeout(r, delayMs * (attempt + 1));
+        });
+      }
+    }
+    var msg = lastErr instanceof Error ? lastErr.message : String(lastErr);
+    throw new Error(msg || "fetch failed");
+  }
   function api(path, opts = {}) {
     return fetch(path, {
       method: opts.method || "GET",
@@ -372,9 +390,9 @@
       setText("stat-loaders", loaderNames.length ? loaderNames.join(" / ") : "-");
       setText("sidebar-status", state.mods.length ? state.mods.length + " \u4E2A\u6A21\u7EC4\u5C31\u7EEA" : "\u5DE5\u4F5C\u53F0\u5C31\u7EEA");
     }
-    async function loadMods() {
+    async function loadMods(force) {
       try {
-        var data = await api("/api/mods");
+        var data = await api("/api/mods" + (force ? "?force=1" : ""));
         state.mods = data.mods || [];
         state.modsFetchedAt = Date.now();
         state.mods.forEach(function(m) {
@@ -779,19 +797,50 @@
       if (!mod.variants.length) return null;
       return mod.variants[0];
     }
-    function pickSourceVariantForMc(mod, mcVersion) {
-      return (mod.variants || []).find(function(v) {
-        return v.mcVersion === mcVersion;
-      }) || pickSourceVariant(mod);
+    function pickSourceVariantForTarget(mod, targetLoader, targetMc, frozenSourceId) {
+      var variants = mod.variants || [];
+      if (frozenSourceId) {
+        var frozen = variants.find(function(v) {
+          return v.id === frozenSourceId;
+        });
+        if (frozen) return frozen;
+      }
+      var crossLoader = variants.find(function(v) {
+        return v.mcVersion === targetMc && v.loader !== targetLoader;
+      });
+      if (crossLoader) return crossLoader;
+      var sameLoaderTemplate = variants.find(function(v) {
+        return v.loader === targetLoader && v.mcVersion !== targetMc;
+      });
+      if (sameLoaderTemplate) return sameLoaderTemplate;
+      var anyOther = variants.find(function(v) {
+        return !(v.loader === targetLoader && v.mcVersion === targetMc);
+      });
+      return anyOther || variants[0] || null;
     }
-    async function consumeVariantGenerationStream(resp) {
+    function pickSourceVariantForMc(mod, mcVersion) {
+      return pickSourceVariantForTarget(mod, "", mcVersion);
+    }
+    function parseApiErrorText(raw, fallback) {
+      var text = (raw || "").trim();
+      if (!text) return fallback;
+      if (text.charAt(0) === "{") {
+        try {
+          var parsed = JSON.parse(text);
+          if (parsed.error) return parsed.error;
+        } catch {
+        }
+      }
+      return text;
+    }
+    async function consumeVariantGenerationStream(resp, onLine) {
       if (!resp.ok) {
         var errText = "";
         try {
           errText = await resp.text();
         } catch {
         }
-        throw new Error(errText || "HTTP " + resp.status);
+        throw new Error(parseApiErrorText(errText, "HTTP " + resp.status));
       }
       if (!resp.body) throw new Error("\u670D\u52A1\u5668\u672A\u8FD4\u56DE\u6D41\u5F0F\u54CD\u5E94");
       var reader = resp.body.getReader();
@@ -799,6 +848,7 @@
       var buffer = "";
       var exitCode = 0;
       var lastErrorLine = "";
+      var variant;
       while (true) {
         var chunk = await reader.read();
         if (chunk.done) break;
@@ -811,31 +861,78 @@
             exitCode = parseInt(line.slice(9), 10);
             return;
           }
+          if (line.indexOf("__VARIANT__:") === 0) {
+            try {
+              variant = JSON.parse(line.slice(12));
+            } catch {
+            }
+            return;
+          }
           if (line.indexOf("__") === 0) return;
           if (line.indexOf("\u9519\u8BEF\uFF1A") === 0) lastErrorLine = line.slice(3);
+          if (onLine) onLine(line);
         });
       }
-      if (exitCode !== 0 && lastErrorLine) throw new Error(lastErrorLine);
-      return exitCode;
+      return { exitCode, variant, lastErrorLine: lastErrorLine || void 0 };
     }
-    async function generateVariantQuiet(mod, loader, mcVersion) {
-      var source = pickSourceVariantForMc(mod, mcVersion);
+    function resolveVariantFromStream(mod, target, stream) {
+      if (stream.variant?.id && stream.variant.projectPath) return stream.variant;
+      var fromMod = (mod.variants || []).find(function(v) {
+        return v.loader === target.loader && v.mcVersion === target.mcVersion;
+      });
+      if (fromMod?.id && fromMod.projectPath) return fromMod;
+      var pathGuess = joinProjectPath(String(mod.modId || ""), target.loader, target.mcVersion);
+      if (pathGuess) {
+        return {
+          id: "",
+          loader: target.loader,
+          mcVersion: target.mcVersion,
+          projectPath: pathGuess
+        };
+      }
+      throw new Error("\u53D8\u4F53\u767B\u8BB0\u5931\u8D25");
+    }
+    async function generateVariantQuiet(mod, loader, mcVersion, onLine, opts) {
+      var modUuid = opts?.modUuid || mod.id;
+      if (!modUuid) throw new Error("\u6A21\u7EC4\u4FE1\u606F\u65E0\u6548");
+      var source = opts?.sourceVariantId ? (mod.variants || []).find(function(v) {
+        return v.id === opts.sourceVariantId;
+      }) || pickSourceVariantForTarget(mod, loader, mcVersion, opts.sourceVariantId) : pickSourceVariantForTarget(mod, loader, mcVersion);
       if (!source) throw new Error("\u6CA1\u6709\u53EF\u7528\u7684\u6E90\u53D8\u4F53");
-      var resp = await fetch("/api/mods/" + mod.id + "/variants", {
+      var resp = await fetchWithRetry("/api/mods/" + encodeURIComponent(String(modUuid)) + "/variants", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sourceVariantId: source.id,
           targetLoader: loader,
           targetMc: mcVersion,
+          modId: mod.modId,
           autoBuild: false
         })
       });
-      var exitCode = await consumeVariantGenerationStream(resp);
-      if (exitCode !== 0) throw new Error("\u751F\u6210\u5931\u8D25\uFF08\u9000\u51FA\u7801 " + exitCode + "\uFF09");
+      var stream = await consumeVariantGenerationStream(resp, onLine);
+      if (stream.exitCode !== 0) {
+        throw new Error(stream.lastErrorLine || "\u751F\u6210\u5931\u8D25\uFF08\u9000\u51FA\u7801 " + stream.exitCode + "\uFF09");
+      }
+      return resolveVariantFromStream(mod, { loader, mcVersion }, stream);
+    }
+    async function verifyProjectQuiet(projectPath, variantId, onLine, opts) {
+      var resp = await fetchWithRetry("/api/verify-project", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectPath,
+          variantId: variantId || void 0,
+          buildOnly: !!opts?.buildOnly
+        })
+      });
+      var stream = await consumeVariantGenerationStream(resp, onLine);
+      if (stream.exitCode !== 0) {
+        throw new Error(stream.lastErrorLine || "\u9A8C\u8BC1\u5931\u8D25\uFF08\u9000\u51FA\u7801 " + stream.exitCode + "\uFF09");
+      }
     }
     async function generateVariantFromMatrix(mod, loader, mc) {
-      var source = pickSourceVariantForMc(mod, mc);
+      var source = pickSourceVariantForTarget(mod, loader, mc);
       if (!source) {
         showError("\u8BF7\u5148\u6709\u81F3\u5C11\u4E00\u4E2A\u53D8\u4F53\u4F5C\u4E3A\u6E90\u7801\u6765\u6E90");
         return;
@@ -1156,12 +1253,15 @@
           else failed++;
         } else {
           pending++;
-          failed++;
         }
       });
       if (!cancelled && pending > 0) return;
-      if (cancelled) notify(batch.modName + " \u6784\u5EFA\u5DF2\u53D6\u6D88", "warning");
       state.buildBatch = null;
+      if (cancelled) {
+        notify(batch.modName + " \u6784\u5EFA\u5DF2\u53D6\u6D88", "warning");
+        return;
+      }
+      showBuildSummaryFeedback({ success, failed, failedVariantIds: [] });
     }
     if (window.dmclBridge) {
       window.dmclBridge.onBuildEvent(function(event) {
@@ -1658,12 +1758,14 @@
       if (btn) btn.disabled = true;
       hideError();
       try {
-        var result = await api("/api/meta/refresh", { method: "POST" });
+        var result = await api("/api/meta/refresh", { method: "POST", body: { force: false } });
         delete state.versionsCache[state.selectedLoader];
         state.versionsCache[state.selectedLoader] = result.loaderVersions && result.loaderVersions[state.selectedLoader] || [];
         updateVersionsHint(false, result.updatedAt);
         await loadVersions(state.selectedLoader);
-        notify("\u7248\u672C\u5217\u8868\u5DF2\u5237\u65B0");
+        notify(
+          result.mode === "full" ? "\u7248\u672C\u5217\u8868\u5DF2\u5168\u91CF\u5237\u65B0" : "\u7248\u672C\u5217\u8868\u5DF2\u589E\u91CF\u5237\u65B0\uFF08\u65B0\u589E " + (result.newReleaseCount || 0) + " \u4E2A MC \u7248\u672C\uFF09"
+        );
       } catch (e) {
         showError("\u5237\u65B0\u7248\u672C\u5931\u8D25\uFF1A" + e.message);
       } finally {
@@ -1741,25 +1843,26 @@
       retryCount = retryCount || 0;
       var mapSel = $("sel-mappings");
       if (!mapSel || !state.selectedMc || !state.selectedLoader) return;
-      mapSel.innerHTML = "<option>\u8BFB\u53D6\u672C\u5730\u7F13\u5B58\u2026</option>";
-      mapSel.disabled = true;
+      if (retryCount === 0) {
+        mapSel.innerHTML = "<option>\u8BFB\u53D6\u672C\u5730\u7F13\u5B58\u2026</option>";
+        mapSel.disabled = true;
+      }
       try {
         var data = await api(
           "/api/mappings/" + state.selectedLoader + "/" + encodeURIComponent(state.selectedMc)
         );
-        var options = data.options || [];
-        var unobfuscated = state.selectedLoader === "fabric" && isUnobfuscatedMc(state.selectedMc);
-        if (!unobfuscated && state.selectedLoader === "fabric" && options.length === 0 && retryCount < 3) {
-          mapSel.innerHTML = "<option>\u6B63\u5728\u63A2\u6D4B Yarn \u6620\u5C04\uFF08" + (retryCount + 1) + "/3\uFF09\u2026</option>";
-          await new Promise(function(r) {
-            setTimeout(r, 1500 + retryCount * 500);
-          });
-          return refreshMappings(retryCount + 1);
-        }
+        var options = (data.options || []).filter(function(o) {
+          return o.available !== false;
+        });
         if (!options.length) {
-          throw new Error(unobfuscated ? "\u6B64\u7248\u672C\u6620\u5C04\u4FE1\u606F\u4E0D\u53EF\u7528" : "\u6B64\u7248\u672C\u6682\u65E0\u53EF\u7528\u6620\u5C04");
+          throw new Error("\u6B64\u7248\u672C\u6682\u65E0\u53EF\u7528\u6620\u5C04");
         }
-        applyMappingsData(data);
+        applyMappingsData(Object.assign({}, data, { options }));
+        if (data.pending && retryCount < 2) {
+          window.setTimeout(function() {
+            void refreshMappings(retryCount + 1);
+          }, 2e3);
+        }
       } catch (e) {
         if (retryCount < 2) {
           await new Promise(function(r) {
@@ -1968,7 +2071,7 @@
         }
         if (exitCode === -1) return;
         setPhase("done");
-        await loadMods();
+        await loadMods(true);
         showView("list");
         showCreateStep("step-loader");
         notify("\u6A21\u7EC4\u5DF2\u521B\u5EFA\u5E76\u5B8C\u6210\u9A8C\u8BC1\u6D41\u7A0B");
@@ -2443,11 +2546,11 @@
       var btn = $("btn-settings-refresh-versions");
       if (btn) btn.disabled = true;
       try {
-        await api("/api/meta/refresh", { method: "POST" });
+        await api("/api/meta/refresh", { method: "POST", body: { force: true } });
         state.versionsCache = {};
         invalidateDetailCache();
         await loadMetaCacheStatus();
-        notify("\u7248\u672C\u5217\u8868\u5DF2\u5237\u65B0");
+        notify("\u7248\u672C\u5217\u8868\u5DF2\u5168\u91CF\u5237\u65B0\uFF08\u542B\u5168\u90E8 Forge MDK \u91CD\u63A2\uFF09");
       } catch (e) {
         showError("\u5237\u65B0\u7248\u672C\u5217\u8868\u5931\u8D25\uFF1A" + e.message);
       } finally {
@@ -2689,6 +2792,7 @@
       if (event.key === "Escape") {
         event.preventDefault();
         if (visibleOverlay.id === "build-all-modal") closeBuildAllModal();
+        else if (visibleOverlay.id === "add-variant-modal") closeAddVariantModal();
         else if (visibleOverlay.id === "modal-overlay") closeModal();
         else visibleOverlay.classList.remove("visible");
         return;
@@ -2721,14 +2825,14 @@
           showView(view);
           if (view === "settings") loadSettings();
           if (view === "external") loadExternalView();
-          if (view === "list") loadMods();
+          if (view === "list") loadMods(true);
         }
       });
     });
     $("detail-back").addEventListener("click", function() {
       state.currentModId = null;
       showView("list");
-      loadMods();
+      loadMods(true);
     });
     $("btn-new-mod").addEventListener("click", function() {
       document.querySelector('.nav-btn[data-view="create"]').click();
@@ -2761,6 +2865,69 @@
         showError(e.message);
       }
     });
+    async function deleteModWithProgress(modId, body) {
+      var mod = state.mods.find(function(m) {
+        return m.id === modId;
+      });
+      var variantCount = mod ? (mod.variants || []).length : 0;
+      var useStream = !!(body.deleteFiles && variantCount > 1);
+      if (useStream) {
+        showModal("\u6B63\u5728\u5220\u9664\u6A21\u7EC4", "\u51C6\u5907\u5220\u9664 " + variantCount + " \u4E2A\u53D8\u4F53\u9879\u76EE\u2026");
+        var log = $("modal-log");
+        var closeBtn = $("modal-close");
+        if (closeBtn) closeBtn.disabled = true;
+        var resp = await fetch("/api/mods/" + modId, {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        if (!resp.ok) {
+          closeModal();
+          var errData = await resp.json().catch(function() {
+            return {};
+          });
+          throw new Error(errData.error || "HTTP " + resp.status);
+        }
+        var reader = resp.body.getReader();
+        var decoder = new TextDecoder();
+        var buffer = "";
+        var result = null;
+        while (true) {
+          var chunk = await reader.read();
+          if (chunk.done) break;
+          buffer += decoder.decode(chunk.value, { stream: true });
+          var lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+          for (var li = 0; li < lines.length; li++) {
+            var line = lines[li].trim();
+            if (!line) continue;
+            var evt = JSON.parse(line);
+            if (evt.type === "progress" && log) {
+              var pct = evt.total ? Math.round((evt.done || 0) / evt.total * 100) : 0;
+              log.innerHTML = "";
+              var div = document.createElement("div");
+              div.textContent = "\u6B63\u5728\u5220\u9664 " + (evt.done || 0) + "/" + evt.total + "\uFF08" + pct + "%\uFF09";
+              log.appendChild(div);
+              if (evt.path) {
+                var pathDiv = document.createElement("div");
+                pathDiv.className = "path";
+                pathDiv.textContent = evt.path;
+                log.appendChild(pathDiv);
+              }
+            } else if (evt.type === "error") {
+              closeModal();
+              throw new Error(evt.error || "\u5220\u9664\u5931\u8D25");
+            } else if (evt.type === "done") {
+              result = evt;
+            }
+          }
+        }
+        closeModal();
+        if (closeBtn) closeBtn.disabled = false;
+        return result || {};
+      }
+      return api("/api/mods/" + modId, { method: "DELETE", body });
+    }
     $("btn-delete-mod").addEventListener("click", async function() {
       if (!state.currentModId) return;
       var mod = state.mods.find(function(m) {
@@ -2772,15 +2939,13 @@
       }).join("\n  \xB7 ");
       var msg = "\u5220\u9664\u6574\u4E2A\u6A21\u7EC4\u300C" + mod.displayName + "\u300D\uFF1F\n\n\u5C06\u5220\u9664 " + mod.variants.length + " \u4E2A\u53D8\u4F53\u7684\u9879\u76EE\u6587\u4EF6\u5939\uFF1A\n  \xB7 " + (paths2 || "(\u65E0\u53D8\u4F53)") + "\n\n\u6B64\u64CD\u4F5C\u4E0D\u53EF\u6062\u590D\u3002";
       if (!await confirmAction({ title: "\u6C38\u4E45\u5220\u9664\u6A21\u7EC4", message: "\u5C06\u5220\u9664\u300C" + mod.displayName + "\u300D\u53CA\u5176 " + mod.variants.length + " \u4E2A\u53D8\u4F53\u9879\u76EE\uFF0C\u6B64\u64CD\u4F5C\u4E0D\u53EF\u6062\u590D\u3002", detail: paths2 || "(\u65E0\u53D8\u4F53\u76EE\u5F55)", confirmLabel: "\u5220\u9664\u6A21\u7EC4\u4E0E\u6587\u4EF6", danger: true })) return;
+      var deletingId = state.currentModId;
       try {
-        var result = await api("/api/mods/" + state.currentModId, {
-          method: "DELETE",
-          body: { deleteFiles: true }
-        });
+        var result = await deleteModWithProgress(deletingId, { deleteFiles: true });
         state.currentModId = null;
         invalidateDetailCache();
         showView("list");
-        loadMods();
+        await loadMods(true);
         var deleted = result.fileResult && result.fileResult.deleted ? result.fileResult.deleted.length : 0;
         notify("\u6A21\u7EC4\u5DF2\u5220\u9664\uFF08" + deleted + " \u4E2A\u6587\u4EF6\u5939\u5DF2\u6E05\u9664\uFF09");
       } catch (e) {
@@ -2897,6 +3062,10 @@
           });
           if (exists) return;
           if (!isMatrixLoaderMcSupported(matrix, loader, mcVersion)) return;
+          var cell = (matrix.cells || []).find(function(c) {
+            return c.loader === loader && c.mcVersion === mcVersion;
+          });
+          if (cell && cell.status !== "available") return;
           pending.push({ loader, mcVersion });
         });
       });
@@ -2944,7 +3113,7 @@
       var summary = $("build-all-summary");
       var list = $("build-all-list");
       if (summary) {
-        summary.textContent = totalCount ? "\u5C06\u4E3A\u300C" + buildAllPendingMod.displayName + "\u300D\u6784\u5EFA " + totalCount + " \u4E2A\u53D8\u4F53\uFF08\u6309 CPU \u6838\u6570\u5E76\u884C\uFF09\uFF1A" : "\u5F53\u524D\u7B5B\u9009\u6761\u4EF6\u4E0B\u6CA1\u6709\u53EF\u6784\u5EFA\u7684\u53D8\u4F53\u3002";
+        summary.textContent = totalCount ? "\u5C06\u4E3A\u300C" + buildAllPendingMod.displayName + "\u300D\u6784\u5EFA " + totalCount + " \u4E2A\u53D8\u4F53\uFF08\u6309 CPU \u6838\u6570\u5E76\u884C\uFF09\uFF1A" + (totalCount >= 8 ? " \u5927\u6279\u91CF\u65F6\u82E5\u5931\u8D25\u589E\u591A\uFF0C\u8BF7\u5728\u8BBE\u7F6E\u4E2D\u964D\u4F4E Gradle \u6784\u5EFA\u5E76\u53D1\uFF082\uFF5E4\uFF09\u540E\u91CD\u8BD5\u5931\u8D25\u9879\u3002" : "") : "\u5F53\u524D\u7B5B\u9009\u6761\u4EF6\u4E0B\u6CA1\u6709\u53EF\u6784\u5EFA\u7684\u53D8\u4F53\u3002";
       }
       if (list) {
         list.innerHTML = "";
@@ -2985,6 +3154,8 @@
       };
       var targets = collectBuildAllTargets(buildAllPendingMod, buildAllPendingMatrix, filterOpts);
       var mod = buildAllPendingMod;
+      var buildAllSource = pickSourceVariant(mod);
+      var frozenBuildSourceId = buildAllSource ? buildAllSource.id : void 0;
       var genErrors = [];
       hideError();
       setBuildAllBusy(true, "\u51C6\u5907\u4E2D\u2026");
@@ -2992,12 +3163,19 @@
         if (includeMissingLoaders && targets.pending.length) {
           for (var i = 0; i < targets.pending.length; i++) {
             var pending = targets.pending[i];
+            var already = (mod.variants || []).some(function(v) {
+              return v.loader === pending.loader && v.mcVersion === pending.mcVersion;
+            });
+            if (already) continue;
             setBuildAllBusy(
               true,
               "\u6B63\u5728\u751F\u6210 " + (LOADER_LABELS[pending.loader] || pending.loader) + " " + pending.mcVersion + "\uFF08" + (i + 1) + "/" + targets.pending.length + "\uFF09\u2026"
             );
             try {
-              await generateVariantQuiet(mod, pending.loader, pending.mcVersion);
+              await generateVariantQuiet(mod, pending.loader, pending.mcVersion, void 0, {
+                modUuid: modId,
+                sourceVariantId: frozenBuildSourceId
+              });
               var detailData = await api("/api/mods/" + modId + "/detail");
               mod = detailData.mod;
               buildAllPendingMod = mod;
@@ -3071,8 +3249,431 @@
     $("build-all-modal")?.addEventListener("click", function(e) {
       if (e.target === $("build-all-modal")) closeBuildAllModal();
     });
-    $("btn-add-variant").addEventListener("click", function() {
-      notify("\u5728\u652F\u6301\u77E9\u9635\u9009\u62E9 \u2192 \u5355\u5143\u683C\u5373\u53EF\u751F\u6210\u53D8\u4F53");
+    var addVariantPendingMod = null;
+    var addVariantPendingMatrix = null;
+    var addVariantReturnFocus = null;
+    var addVariantBusy = false;
+    var addVariantBatchJobId = null;
+    var addVariantPollTimer = null;
+    var addVariantPollInFlight = false;
+    var addVariantTaskStates = [];
+    function stopAddVariantPolling() {
+      if (addVariantPollTimer) {
+        clearInterval(addVariantPollTimer);
+        addVariantPollTimer = null;
+      }
+    }
+    function mapBatchTargetStatus(status) {
+      if (status === "done" || status === "skipped") return "done";
+      if (status === "failed" || status === "cancelled") return "failed";
+      if (status === "generating" || status === "verifying") return "running";
+      return "pending";
+    }
+    function syncAddVariantProgressFromJob(job) {
+      if (!job.targets?.length) return;
+      job.targets.forEach(function(target, index) {
+        if (!addVariantTaskStates[index]) return;
+        addVariantTaskStates[index].status = mapBatchTargetStatus(target.status);
+        addVariantTaskStates[index].message = target.error || target.message || "";
+      });
+      renderAddVariantProgress();
+      var summary = $("add-variant-summary");
+      if (summary) {
+        var phaseLabel = job.phase === "verify" ? "\u6784\u5EFA\u9A8C\u8BC1\u4E2D" : job.phase === "generate" ? "\u751F\u6210\u9879\u76EE\u4E2D" : "\u6536\u5C3E\u4E2D";
+        summary.textContent = phaseLabel + " \xB7 \u6210\u529F " + (job.successes || 0) + " / " + (job.total || job.targets.length) + (job.skipped ? " \xB7 \u8DF3\u8FC7 " + job.skipped : "") + (job.failures ? " \xB7 \u5931\u8D25 " + job.failures : "") + (job.verifyParallel ? " \xB7 \u9A8C\u8BC1 worker " + job.verifyParallel + " \u8DEF \xB7 Gradle " + (job.gradleParallel ?? 1) + " \u8DEF" : "");
+      }
+    }
+    function startAddVariantJobPolling(jobId, modId) {
+      stopAddVariantPolling();
+      addVariantBatchJobId = jobId;
+      addVariantPollTimer = setInterval(function() {
+        void (async function() {
+          if (addVariantPollInFlight) return;
+          addVariantPollInFlight = true;
+          try {
+            var data = await api("/api/batch-jobs/" + encodeURIComponent(jobId));
+            var job = data.job;
+            if (!job) return;
+            syncAddVariantProgressFromJob(job);
+            if (job.state === "running" || job.state === "pending") return;
+            stopAddVariantPolling();
+            addVariantBatchJobId = null;
+            setAddVariantBusy(true, "\u5B8C\u6210\uFF1A\u6210\u529F " + (job.successes || 0) + (job.skipped ? "\uFF0C\u8DF3\u8FC7 " + job.skipped : "") + (job.failures ? "\uFF0C\u5931\u8D25 " + job.failures : ""));
+            closeAddVariantModal(true);
+            invalidateDetailCache(modId);
+            await refreshDetail({ force: true });
+            await loadMods(true);
+            var errors = (job.targets || []).filter(function(t) {
+              return t.status === "failed";
+            }).map(function(t) {
+              return (LOADER_LABELS[t.loader] || t.loader) + " " + t.mcVersion + "\uFF1A" + (t.error || t.message || "\u5931\u8D25");
+            });
+            if (job.successes || job.skipped) {
+              notify(
+                "\u6279\u91CF\u5B8C\u6210\uFF1A\u6210\u529F " + (job.successes || 0) + (job.skipped ? "\uFF0C\u8DF3\u8FC7 " + job.skipped : "") + (job.failures ? "\uFF0C\u5931\u8D25 " + job.failures : ""),
+                job.failures ? "warning" : "success"
+              );
+            } else {
+              showError("\u6279\u91CF\u521B\u5EFA\u5931\u8D25\uFF1A" + (errors[0] || "\u672A\u77E5\u9519\u8BEF"));
+            }
+            if (errors.length > 1) {
+              showModal("\u90E8\u5206\u53D8\u4F53\u521B\u5EFA\u6216\u9A8C\u8BC1\u5931\u8D25", errors.join("\n"));
+            }
+            setAddVariantBusy(false);
+          } catch (e) {
+          } finally {
+            addVariantPollInFlight = false;
+          }
+        })();
+      }, 1200);
+    }
+    var ADD_VARIANT_LOADER_ORDER = {
+      fabric: 0,
+      forge: 1,
+      neoforge: 2
+    };
+    function collectMatrixAvailable(matrix, mod, loader) {
+      var cells = matrix?.cells || [];
+      var order = matrix?.versions || [];
+      var registered = mod?.variants || [];
+      var out = cells.filter(function(c) {
+        if (c.status !== "available") return false;
+        if (loader && c.loader !== loader) return false;
+        if (registered.some(function(v) {
+          return v.loader === c.loader && v.mcVersion === c.mcVersion;
+        })) return false;
+        return true;
+      }).map(function(c) {
+        return { loader: c.loader, mcVersion: c.mcVersion };
+      });
+      out.sort(function(a, b) {
+        var lo = (ADD_VARIANT_LOADER_ORDER[a.loader] ?? 99) - (ADD_VARIANT_LOADER_ORDER[b.loader] ?? 99);
+        if (lo !== 0) return lo;
+        var ai = order.indexOf(a.mcVersion);
+        var bi = order.indexOf(b.mcVersion);
+        if (ai < 0 && bi < 0) return b.mcVersion.localeCompare(a.mcVersion);
+        if (ai < 0) return 1;
+        if (bi < 0) return -1;
+        return ai - bi;
+      });
+      return out;
+    }
+    function addVariantLoaderFilterValue() {
+      var loaderEl = $("add-variant-loader");
+      var value = loaderEl ? loaderEl.value : "";
+      return value || void 0;
+    }
+    function setAddVariantProgressVisible(visible) {
+      var panel = $("add-variant-progress-panel");
+      var list = $("add-variant-list");
+      if (panel) panel.hidden = !visible;
+      if (list) list.hidden = visible;
+    }
+    function renderAddVariantProgress() {
+      var statsEl = $("add-variant-progress-stats");
+      var listEl = $("add-variant-progress-list");
+      if (!statsEl || !listEl) return;
+      var done = addVariantTaskStates.filter(function(t) {
+        return t.status === "done";
+      }).length;
+      var failed = addVariantTaskStates.filter(function(t) {
+        return t.status === "failed";
+      }).length;
+      var running = addVariantTaskStates.filter(function(t) {
+        return t.status === "running";
+      }).length;
+      var pending = addVariantTaskStates.filter(function(t) {
+        return t.status === "pending";
+      }).length;
+      statsEl.textContent = "\u8FDB\u5EA6 " + (done + failed) + "/" + addVariantTaskStates.length + " \xB7 \u8FDB\u884C\u4E2D " + running + " \xB7 \u7B49\u5F85 " + pending + (failed ? " \xB7 \u5931\u8D25 " + failed : "");
+      listEl.innerHTML = "";
+      addVariantTaskStates.forEach(function(task, index) {
+        var li = document.createElement("li");
+        li.className = "add-variant-progress-item";
+        li.dataset.status = task.status;
+        var badge = document.createElement("span");
+        badge.className = "add-variant-progress-badge";
+        badge.textContent = task.status === "done" ? "\u2713" : task.status === "failed" ? "!" : task.status === "running" ? "\u2026" : String(index + 1);
+        var copy = document.createElement("div");
+        copy.className = "add-variant-progress-copy";
+        var title = document.createElement("strong");
+        title.textContent = (LOADER_LABELS[task.loader] || task.loader) + " " + task.mcVersion;
+        var detail = document.createElement("span");
+        detail.textContent = task.message || (task.status === "pending" ? "\u7B49\u5F85\u4E2D\u2026" : "");
+        copy.appendChild(title);
+        copy.appendChild(detail);
+        li.appendChild(badge);
+        li.appendChild(copy);
+        listEl.appendChild(li);
+      });
+    }
+    function initAddVariantProgress(targets) {
+      addVariantTaskStates = targets.map(function(target) {
+        return {
+          loader: target.loader,
+          mcVersion: target.mcVersion,
+          status: "pending",
+          message: "\u7B49\u5F85\u4E2D\u2026"
+        };
+      });
+      setAddVariantProgressVisible(true);
+      renderAddVariantProgress();
+    }
+    function patchAddVariantTask(index, patch) {
+      if (!addVariantTaskStates[index]) return;
+      if (patch.status) addVariantTaskStates[index].status = patch.status;
+      if (patch.message !== void 0) addVariantTaskStates[index].message = patch.message;
+      renderAddVariantProgress();
+    }
+    function resetAddVariantProgress() {
+      addVariantTaskStates = [];
+      setAddVariantProgressVisible(false);
+      var listEl = $("add-variant-progress-list");
+      var statsEl = $("add-variant-progress-stats");
+      if (listEl) listEl.innerHTML = "";
+      if (statsEl) statsEl.textContent = "";
+    }
+    function setAddVariantBusy(busy, message) {
+      addVariantBusy = busy;
+      var confirmBtn = $("add-variant-confirm");
+      var cancelBtn = $("add-variant-cancel");
+      var options = $("add-variant-modal")?.querySelector(".add-variant-options");
+      if (confirmBtn) {
+        confirmBtn.disabled = busy;
+        confirmBtn.textContent = busy ? "\u521B\u5EFA\u5E76\u9A8C\u8BC1\u4E2D\u2026" : "\u5F00\u59CB\u521B\u5EFA\u5E76\u9A8C\u8BC1";
+      }
+      if (cancelBtn) cancelBtn.disabled = busy;
+      if (options) {
+        options.querySelectorAll("input, select").forEach(function(el) {
+          el.disabled = busy;
+        });
+      }
+      var list = $("add-variant-list");
+      if (list) {
+        list.querySelectorAll("input").forEach(function(el) {
+          el.disabled = busy;
+        });
+      }
+      if (busy && message) {
+        var summary = $("add-variant-summary");
+        if (summary) summary.textContent = message;
+      }
+    }
+    function refreshAddVariantModalList() {
+      if (!addVariantPendingMatrix) return;
+      var loaderFilter = addVariantLoaderFilterValue();
+      var available = collectMatrixAvailable(addVariantPendingMatrix, addVariantPendingMod, loaderFilter);
+      var list = $("add-variant-list");
+      var summary = $("add-variant-summary");
+      var selectAllEl = $("add-variant-select-all");
+      var confirmBtn = $("add-variant-confirm");
+      var loaderLabel = loaderFilter ? LOADER_LABELS[loaderFilter] : "\u5168\u90E8\u52A0\u8F7D\u5668";
+      if (summary) {
+        summary.textContent = available.length ? "\u4E3A\u300C" + (addVariantPendingMod?.displayName || "\u6A21\u7EC4") + "\u300D\u521B\u5EFA\u5E76\u9A8C\u8BC1 " + loaderLabel + " \u53D8\u4F53\uFF0C\u5171 " + available.length + " \u4E2A\u53EF\u9009\uFF1A" : loaderLabel + " \u5F53\u524D\u6CA1\u6709\u53EF\u521B\u5EFA\u7684\u7248\u672C\uFF08\u77E9\u9635\u4E2D\u5DF2\u5168\u90E8\u5B58\u5728\u6216\u4E0D\u652F\u6301\uFF09\u3002";
+      }
+      if (list) {
+        list.innerHTML = "";
+        if (!available.length) {
+          var empty = document.createElement("p");
+          empty.className = "add-variant-list-empty";
+          empty.textContent = loaderFilter ? "\u8BF7\u5207\u6362\u52A0\u8F7D\u5668\uFF0C\u6216\u5728\u77E9\u9635\u4E2D\u67E5\u770B\u5176\u4ED6\u53EF\u521B\u5EFA\u5355\u5143\u683C\u3002" : "\u5F53\u524D Fabric / Forge / NeoForge \u5747\u6CA1\u6709\u53EF\u521B\u5EFA\u7684\u7248\u672C\u3002";
+          list.appendChild(empty);
+        } else {
+          available.forEach(function(item) {
+            var label = document.createElement("label");
+            label.className = "checkbox-row";
+            var input = document.createElement("input");
+            input.type = "checkbox";
+            input.checked = !!(selectAllEl && selectAllEl.checked);
+            input.dataset.loader = item.loader;
+            input.dataset.mc = item.mcVersion;
+            var span = document.createElement("span");
+            span.textContent = LOADER_LABELS[item.loader] + " " + item.mcVersion;
+            label.appendChild(input);
+            label.appendChild(span);
+            list.appendChild(label);
+          });
+        }
+      }
+      if (confirmBtn) confirmBtn.disabled = available.length === 0 || addVariantBusy;
+      if (selectAllEl) selectAllEl.disabled = available.length === 0 || addVariantBusy;
+    }
+    function openAddVariantModal(mod, matrix) {
+      if (!mod.variants?.length) {
+        notify("\u8BF7\u5148\u81F3\u5C11\u6709\u4E00\u4E2A\u53D8\u4F53\u4F5C\u4E3A\u6E90\u7801\u6765\u6E90", "warning");
+        return;
+      }
+      resetAddVariantProgress();
+      addVariantReturnFocus = document.activeElement;
+      addVariantPendingMod = mod;
+      addVariantPendingMatrix = matrix;
+      var loaderEl = $("add-variant-loader");
+      var selectAllEl = $("add-variant-select-all");
+      if (selectAllEl) selectAllEl.checked = true;
+      var allCount = collectMatrixAvailable(matrix, mod).length;
+      if (loaderEl) loaderEl.value = allCount > 0 ? "" : "fabric";
+      refreshAddVariantModalList();
+      $("add-variant-modal")?.classList.add("visible");
+      requestAnimationFrame(function() {
+        (selectAllEl && !selectAllEl.disabled ? selectAllEl : $("add-variant-cancel"))?.focus();
+      });
+    }
+    function closeAddVariantModal(force) {
+      if (addVariantBusy && addVariantBatchJobId && !force) {
+        notify("\u540E\u53F0\u4EFB\u52A1\u7EE7\u7EED\u8FD0\u884C\uFF0C\u518D\u6B21\u70B9\u51FB\u300C\u6279\u91CF\u521B\u5EFA\u300D\u53EF\u67E5\u770B\u8FDB\u5EA6");
+        stopAddVariantPolling();
+        addVariantBatchJobId = null;
+        addVariantPendingMod = null;
+        addVariantPendingMatrix = null;
+        setAddVariantBusy(false);
+        resetAddVariantProgress();
+        $("add-variant-modal")?.classList.remove("visible");
+        addVariantReturnFocus?.focus();
+        addVariantReturnFocus = null;
+        return;
+      }
+      stopAddVariantPolling();
+      addVariantBatchJobId = null;
+      addVariantPendingMod = null;
+      addVariantPendingMatrix = null;
+      setAddVariantBusy(false);
+      resetAddVariantProgress();
+      $("add-variant-modal")?.classList.remove("visible");
+      addVariantReturnFocus?.focus();
+      addVariantReturnFocus = null;
+    }
+    function getSelectedAddVariantTargets() {
+      var list = $("add-variant-list");
+      if (!list) return [];
+      var targets = [];
+      list.querySelectorAll("input[type=checkbox][data-loader]").forEach(function(input) {
+        if (!input.checked) return;
+        targets.push({ loader: input.dataset.loader || "", mcVersion: input.dataset.mc || "" });
+      });
+      return targets;
+    }
+    async function confirmAddVariants() {
+      if (addVariantBusy || !addVariantPendingMod) return;
+      var modId = String(addVariantPendingMod.id || "");
+      if (!modId) {
+        notify("\u6A21\u7EC4\u4FE1\u606F\u65E0\u6548", "warning");
+        return;
+      }
+      var targets = getSelectedAddVariantTargets();
+      if (!targets.length) {
+        notify("\u8BF7\u81F3\u5C11\u9009\u62E9\u4E00\u4E2A\u7248\u672C", "warning");
+        return;
+      }
+      var modName = String(addVariantPendingMod.displayName || "\u6A21\u7EC4");
+      var batchSource = pickSourceVariant(addVariantPendingMod);
+      if (!batchSource) {
+        notify("\u8BF7\u5148\u81F3\u5C11\u6709\u4E00\u4E2A\u53D8\u4F53\u4F5C\u4E3A\u6E90\u7801\u6765\u6E90", "warning");
+        return;
+      }
+      var buildOnly = targets.length >= 8;
+      if (targets.length > 1 && !await confirmAction({
+        title: "\u6279\u91CF\u521B\u5EFA\u53D8\u4F53",
+        message: "\u5C06\u4E3A\u300C" + modName + "\u300D\u5728\u670D\u52A1\u7AEF\u521B\u5EFA\u5E76\u9A8C\u8BC1 " + targets.length + " \u4E2A\u53D8\u4F53\u3002",
+        detail: "\u540E\u53F0\u6301\u4E45\u5316\u4EFB\u52A1\uFF1A\u5148\u4E32\u884C\u751F\u6210\u5168\u90E8\u9879\u76EE\uFF0C\u518D\u5E76\u884C Gradle \u6784\u5EFA\u9A8C\u8BC1\u3002" + (buildOnly ? "\n\u5927\u6279\u91CF\uFF1A\u4EC5 Gradle \u6784\u5EFA\uFF08\u8DF3\u8FC7\u5BA2\u6237\u7AEF\uFF09\u3002" : "\n\u542B\u5BA2\u6237\u7AEF\u542F\u52A8\u9A8C\u8BC1\u3002") + "\nForge \u7248\u672C\u4F1A\u5148\u63A2\u6D4B MDK \u53EF\u7528\u6027\uFF0C\u4E0D\u53EF\u7528\u7684\u5C06\u8DF3\u8FC7\u3002\n\u4EFB\u52A1\u5199\u5165 ~/.dmcl/batch-jobs/\uFF0C\u5173\u95ED\u7A97\u53E3\u4E5F\u4E0D\u4F1A\u4E2D\u65AD\uFF1B\u91CD\u542F\u5E94\u7528\u53EF\u81EA\u52A8\u6062\u590D\u3002\n\u5DF2\u5B58\u5728\u7684\u76EE\u5F55\u4F1A\u8DF3\u8FC7\u751F\u6210\u5E76\u7EE7\u7EED\u9A8C\u8BC1\u3002",
+        confirmLabel: "\u5F00\u59CB\u6279\u91CF\u521B\u5EFA"
+      })) return;
+      hideError();
+      initAddVariantProgress(targets);
+      setAddVariantBusy(true, "\u6B63\u5728\u542F\u52A8\u540E\u53F0\u6279\u91CF\u4EFB\u52A1\uFF08" + targets.length + " \u4E2A\uFF09\u2026");
+      try {
+        var result = await api("/api/mods/" + encodeURIComponent(modId) + "/variants/batch", {
+          method: "POST",
+          body: {
+            sourceVariantId: batchSource.id,
+            targets,
+            buildOnly,
+            modName
+          }
+        });
+        if (!result.job?.id) throw new Error("\u672A\u6536\u5230\u4EFB\u52A1 ID");
+        setAddVariantBusy(true, "\u540E\u53F0\u4EFB\u52A1\u5DF2\u542F\u52A8 \xB7 \u9A8C\u8BC1 worker " + (result.job.verifyParallel || 1) + " \u8DEF \xB7 Gradle " + (result.job.gradleParallel ?? 1) + " \u8DEF\u2026");
+        startAddVariantJobPolling(result.job.id, modId);
+      } catch (e) {
+        showError("\u6279\u91CF\u521B\u5EFA\u5931\u8D25\uFF1A" + e.message);
+        setAddVariantBusy(false);
+        refreshAddVariantModalList();
+      }
+    }
+    $("btn-add-variant").addEventListener("click", async function() {
+      if (!state.currentModId) return;
+      hideError();
+      try {
+        var active = await api("/api/batch-jobs/active");
+        if (active.job && (active.job.state === "running" || active.job.state === "pending")) {
+          if (active.job.modUuid === state.currentModId) {
+            openAddVariantModalFromActiveJob(active.job);
+            return;
+          }
+          notify("\u5DF2\u6709\u5176\u4ED6\u6A21\u7EC4\u7684\u6279\u91CF\u4EFB\u52A1\u8FDB\u884C\u4E2D\uFF08" + active.job.targets.length + " \u4E2A\uFF09", "warning");
+        }
+        var cached = state.detailCache[state.currentModId];
+        if (cached && !isDetailStale(cached)) {
+          openAddVariantModal(cached.mod, cached.matrix);
+          return;
+        }
+        var detailData = await api("/api/mods/" + state.currentModId + "/detail");
+        openAddVariantModal(detailData.mod, detailData.matrix);
+      } catch (e) {
+        showError("\u52A0\u8F7D\u6A21\u7EC4\u4FE1\u606F\u5931\u8D25\uFF1A" + e.message);
+      }
+    });
+    function openAddVariantModalFromActiveJob(job) {
+      resetAddVariantProgress();
+      addVariantReturnFocus = document.activeElement;
+      addVariantTaskStates = job.targets.map(function(t) {
+        return {
+          loader: t.loader,
+          mcVersion: t.mcVersion,
+          status: mapBatchTargetStatus(t.status),
+          message: t.error || t.message || "\u7B49\u5F85\u4E2D\u2026"
+        };
+      });
+      setAddVariantProgressVisible(true);
+      renderAddVariantProgress();
+      syncAddVariantProgressFromJob(job);
+      setAddVariantBusy(true, "\u540E\u53F0\u4EFB\u52A1\u8FDB\u884C\u4E2D\u2026");
+      $("add-variant-modal")?.classList.add("visible");
+      startAddVariantJobPolling(job.id, String(state.currentModId || ""));
+    }
+    $("add-variant-cancel")?.addEventListener("click", async function() {
+      if (addVariantBusy && addVariantBatchJobId) {
+        if (await confirmAction({
+          title: "\u53D6\u6D88\u6279\u91CF\u4EFB\u52A1",
+          message: "\u786E\u5B9A\u53D6\u6D88\u540E\u53F0\u6279\u91CF\u521B\u5EFA\uFF1F",
+          detail: "\u5DF2\u5B8C\u6210\u7684\u53D8\u4F53\u4F1A\u4FDD\u7559\uFF0C\u8FDB\u884C\u4E2D\u7684\u9879\u5C06\u505C\u6B62\u3002",
+          confirmLabel: "\u53D6\u6D88\u4EFB\u52A1"
+        })) {
+          try {
+            await api("/api/batch-jobs/" + encodeURIComponent(addVariantBatchJobId) + "/cancel", { method: "POST" });
+            stopAddVariantPolling();
+            addVariantBatchJobId = null;
+            closeAddVariantModal(true);
+            notify("\u6279\u91CF\u4EFB\u52A1\u5DF2\u53D6\u6D88");
+          } catch (e) {
+            showError("\u53D6\u6D88\u5931\u8D25\uFF1A" + e.message);
+          }
+        }
+        return;
+      }
+      closeAddVariantModal();
+    });
+    $("add-variant-confirm")?.addEventListener("click", function() {
+      void confirmAddVariants();
+    });
+    $("add-variant-loader")?.addEventListener("change", refreshAddVariantModalList);
+    $("add-variant-select-all")?.addEventListener("change", function() {
+      var checked = $("add-variant-select-all").checked;
+      $("add-variant-list")?.querySelectorAll("input[type=checkbox][data-loader]").forEach(function(input) {
+        input.checked = checked;
+      });
+    });
+    $("add-variant-modal")?.addEventListener("click", function(e) {
+      if (e.target === $("add-variant-modal")) closeAddVariantModal();
     });
     $("search-mods").addEventListener("input", function() {
       state.search = $("search-mods").value.trim();
@@ -3202,7 +3803,7 @@
       void copySourcePath("source-selected-path");
     });
     initCreateWizard();
-    loadMods();
+    loadMods(true);
     loadDefaultDir();
     updateQueueBar();
     console.log("[dmcl] Workbench ready");

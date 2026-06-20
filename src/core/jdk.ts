@@ -209,13 +209,24 @@ export function loomMinJvm(loomVersion: string): number {
   return 21;
 }
 
+/** ForgeGradle 2.x / 3.x（非 FG7 dependency 语法） */
+export function usesForgeGradleLegacy(targetDir: string): boolean {
+  const buildFile = path.join(targetDir, "build.gradle");
+  if (!fs.existsSync(buildFile)) return false;
+  const content = fs.readFileSync(buildFile, "utf8");
+  if (/minecraft\.dependency\s*\(\s*['"]net\.minecraftforge:forge/.test(content)) return false;
+  if (/id\s*['"]net\.minecraftforge\.gradle['"]/.test(content)) return false;
+  return /net\.minecraftforge\.gradle|ForgeGradle:/.test(content);
+}
+
 /**
  * Gradle 进程应使用的 JDK 主版本。
- * 由 Gradle Wrapper 与 Loom 插件决定，与模组 bytecode 目标版本（requiredJavaFor）无关。
+ * 旧版 ForgeGradle 固定 Java 8；现代项目取 Gradle/Loom/MC 编译目标的最高需求。
  */
 export function pickJdkMajor(mcVersion: string, targetDir: string): number {
   const gradleVer = readGradleVersion(targetDir);
   const range = gradleVer ? gradleJvmRange(gradleVer) : { min: 17, max: 25 };
+  if (usesForgeGradleLegacy(targetDir)) return 8;
   const loomVer = readLoomVersion(targetDir);
   const loomNeed = loomVer ? loomMinJvm(loomVer) : range.min;
   const compileNeed = requiredJavaFor(mcVersion);
@@ -230,7 +241,7 @@ export function isJvmCompatible(targetDir: string): boolean {
   const range = gradleJvmRange(gradleVer);
   if (major < range.min || major > range.max) return false;
   const mcVersion = readMcVersionFromProject(targetDir);
-  if (mcVersion && major < requiredJavaFor(mcVersion)) return false;
+  if (mcVersion && !usesForgeGradleLegacy(targetDir) && major < requiredJavaFor(mcVersion)) return false;
   const loomVer = readLoomVersion(targetDir);
   if (loomVer && major < loomMinJvm(loomVer)) return false;
   return true;
@@ -264,7 +275,7 @@ export function resolveProjectJdkNeed(
   const major = pickJdkMajor(mcVersion, targetDir);
   const gradleVersion = readGradleVersion(targetDir);
   const loomVersion = readLoomVersion(targetDir);
-  const compileNeed = requiredJavaFor(mcVersion);
+  const compileNeed = usesForgeGradleLegacy(targetDir) ? 8 : requiredJavaFor(mcVersion);
   const range = gradleVersion ? gradleJvmRange(gradleVersion) : { min: 17, max: 25 };
   const bits: string[] = [];
   if (gradleVersion) bits.push(`Gradle ${gradleVersion}`);
@@ -277,8 +288,12 @@ export function resolveProjectJdkNeed(
   return { major, gradleVersion, loomVersion, summary, incompatibleReason };
 }
 
-/** 项目 gradle.properties 是否已指向可用且版本正确的 JDK */
-export function projectJdkIsReady(targetDir: string, neededMajor: number): boolean {
+/** 项目 gradle.properties 是否已指向可用且在兼容范围内的 JDK */
+export function projectJdkIsReady(
+  targetDir: string,
+  neededMajor: number,
+  mcVersion?: string,
+): boolean {
   const configured = readJavaHomeFromProject(targetDir);
   if (!configured) return false;
   const bin = process.platform === "win32"
@@ -286,7 +301,16 @@ export function projectJdkIsReady(targetDir: string, neededMajor: number): boole
     : path.join(configured, "bin", "java");
   if (!fs.existsSync(bin)) return false;
   const major = detectJavaMajorAt(configured);
-  return major === neededMajor;
+  if (major === null || major < neededMajor) return false;
+  const gradleVer = readGradleVersion(targetDir);
+  const range = gradleVer ? gradleJvmRange(gradleVer) : { min: 17, max: 25 };
+  if (major > range.max) return false;
+  if (mcVersion && !usesForgeGradleLegacy(targetDir)) {
+    if (major < requiredJavaFor(mcVersion)) return false;
+  } else if (usesForgeGradleLegacy(targetDir) && major !== 8) {
+    return false;
+  }
+  return true;
 }
 /**
  * 确保项目使用 DMCL 托管的 JDK：先分析需求，再查本地缓存，缺失则自动下载。
@@ -306,9 +330,10 @@ export async function ensureProjectJdk(
     throw new Error(need.incompatibleReason);
   }
 
-  if (projectJdkIsReady(targetDir, need.major)) {
+  if (projectJdkIsReady(targetDir, need.major, mcVersion)) {
     const home = readJavaHomeFromProject(targetDir)!;
-    log(`✔ 项目已配置 JDK ${need.major}：${home}`);
+    const configuredMajor = detectJavaMajorAt(home);
+    log(`✔ 项目已配置 JDK ${configuredMajor ?? need.major}：${home}`);
     return;
   }
 

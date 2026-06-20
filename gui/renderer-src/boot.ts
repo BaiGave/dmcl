@@ -2,7 +2,7 @@ import { state, pathRefreshTimer, setPathRefreshTimer } from "./state";
 import { LOADERS, LOADER_LABELS, STATUS_LABELS, SIDE_LAYOUT_HINTS, SIDE_LAYOUT_HOVER_TIPS, SIDE_LAYOUT_OPTIONS } from "./constants";
 import { $, showError, hideError, setText, notify, showView, esc, showModal, closeModal, confirmAction } from "./dom";
 import { hydrateIcons, icon, loaderIcon } from "./icons";
-import { api } from "./api";
+import { api, fetchWithRetry } from "./api";
 
 export function bootWorkbench(): void {
 
@@ -62,9 +62,9 @@ export function bootWorkbench(): void {
 
   // ============ 模组列表 ============
 
-  async function loadMods() {
+  async function loadMods(force?: boolean) {
     try {
-      var data = await api("/api/mods");
+      var data = await api("/api/mods" + (force ? "?force=1" : ""));
       state.mods = data.mods || [];
       state.modsFetchedAt = Date.now();
       state.mods.forEach(function (m) {
@@ -494,15 +494,69 @@ export function bootWorkbench(): void {
     return mod.variants[0];
   }
 
-  function pickSourceVariantForMc(mod, mcVersion) {
-    return (mod.variants || []).find(function (v) { return v.mcVersion === mcVersion; }) || pickSourceVariant(mod);
+  /** 为新建变体选源码模板：不用目标格自身，并行批量时优先冻结的源变体 ID */
+  function pickSourceVariantForTarget(
+    mod,
+    targetLoader: string,
+    targetMc: string,
+    frozenSourceId?: string,
+  ) {
+    var variants = mod.variants || [];
+    if (frozenSourceId) {
+      var frozen = variants.find(function (v) { return v.id === frozenSourceId; });
+      if (frozen) return frozen;
+    }
+    var crossLoader = variants.find(function (v) {
+      return v.mcVersion === targetMc && v.loader !== targetLoader;
+    });
+    if (crossLoader) return crossLoader;
+    var sameLoaderTemplate = variants.find(function (v) {
+      return v.loader === targetLoader && v.mcVersion !== targetMc;
+    });
+    if (sameLoaderTemplate) return sameLoaderTemplate;
+    var anyOther = variants.find(function (v) {
+      return !(v.loader === targetLoader && v.mcVersion === targetMc);
+    });
+    return anyOther || variants[0] || null;
   }
 
-  async function consumeVariantGenerationStream(resp) {
+  function pickSourceVariantForMc(mod, mcVersion) {
+    return pickSourceVariantForTarget(mod, "", mcVersion);
+  }
+
+  function parseApiErrorText(raw: string, fallback: string): string {
+    var text = (raw || "").trim();
+    if (!text) return fallback;
+    if (text.charAt(0) === "{") {
+      try {
+        var parsed = JSON.parse(text) as { error?: string };
+        if (parsed.error) return parsed.error;
+      } catch { /* ignore */ }
+    }
+    return text;
+  }
+
+  type StreamVariantInfo = {
+    id: string;
+    loader: string;
+    mcVersion: string;
+    projectPath: string;
+  };
+
+  type VariantStreamResult = {
+    exitCode: number;
+    variant?: StreamVariantInfo;
+    lastErrorLine?: string;
+  };
+
+  async function consumeVariantGenerationStream(
+    resp: Response,
+    onLine?: (line: string) => void,
+  ): Promise<VariantStreamResult> {
     if (!resp.ok) {
       var errText = "";
       try { errText = await resp.text(); } catch { /* ignore */ }
-      throw new Error(errText || "HTTP " + resp.status);
+      throw new Error(parseApiErrorText(errText, "HTTP " + resp.status));
     }
     if (!resp.body) throw new Error("服务器未返回流式响应");
 
@@ -511,6 +565,7 @@ export function bootWorkbench(): void {
     var buffer = "";
     var exitCode = 0;
     var lastErrorLine = "";
+    var variant: StreamVariantInfo | undefined;
 
     while (true) {
       var chunk = await reader.read();
@@ -524,35 +579,100 @@ export function bootWorkbench(): void {
           exitCode = parseInt(line.slice(9), 10);
           return;
         }
+        if (line.indexOf("__VARIANT__:") === 0) {
+          try {
+            variant = JSON.parse(line.slice(12)) as StreamVariantInfo;
+          } catch { /* ignore */ }
+          return;
+        }
         if (line.indexOf("__") === 0) return;
         if (line.indexOf("错误：") === 0) lastErrorLine = line.slice(3);
+        if (onLine) onLine(line);
       });
     }
 
-    if (exitCode !== 0 && lastErrorLine) throw new Error(lastErrorLine);
-    return exitCode;
+    return { exitCode: exitCode, variant: variant, lastErrorLine: lastErrorLine || undefined };
   }
 
-  async function generateVariantQuiet(mod, loader, mcVersion) {
-    var source = pickSourceVariantForMc(mod, mcVersion);
+  function resolveVariantFromStream(
+    mod: Record<string, unknown>,
+    target: { loader: string; mcVersion: string },
+    stream: VariantStreamResult,
+  ): StreamVariantInfo {
+    if (stream.variant?.id && stream.variant.projectPath) return stream.variant;
+    var fromMod = ((mod.variants || []) as StreamVariantInfo[]).find(function (v) {
+      return v.loader === target.loader && v.mcVersion === target.mcVersion;
+    });
+    if (fromMod?.id && fromMod.projectPath) return fromMod;
+    var pathGuess = joinProjectPath(String(mod.modId || ""), target.loader, target.mcVersion);
+    if (pathGuess) {
+      return {
+        id: "",
+        loader: target.loader,
+        mcVersion: target.mcVersion,
+        projectPath: pathGuess,
+      };
+    }
+    throw new Error("变体登记失败");
+  }
+
+  async function generateVariantQuiet(
+    mod,
+    loader,
+    mcVersion,
+    onLine?: (line: string) => void,
+    opts?: { modUuid?: string; sourceVariantId?: string },
+  ): Promise<StreamVariantInfo> {
+    var modUuid = opts?.modUuid || mod.id;
+    if (!modUuid) throw new Error("模组信息无效");
+
+    var source = opts?.sourceVariantId
+      ? (mod.variants || []).find(function (v) { return v.id === opts.sourceVariantId; })
+        || pickSourceVariantForTarget(mod, loader, mcVersion, opts.sourceVariantId)
+      : pickSourceVariantForTarget(mod, loader, mcVersion);
     if (!source) throw new Error("没有可用的源变体");
 
-    var resp = await fetch("/api/mods/" + mod.id + "/variants", {
+    var resp = await fetchWithRetry("/api/mods/" + encodeURIComponent(String(modUuid)) + "/variants", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         sourceVariantId: source.id,
         targetLoader: loader,
         targetMc: mcVersion,
+        modId: mod.modId,
         autoBuild: false,
       }),
     });
-    var exitCode = await consumeVariantGenerationStream(resp);
-    if (exitCode !== 0) throw new Error("生成失败（退出码 " + exitCode + "）");
+    var stream = await consumeVariantGenerationStream(resp, onLine);
+    if (stream.exitCode !== 0) {
+      throw new Error(stream.lastErrorLine || ("生成失败（退出码 " + stream.exitCode + "）"));
+    }
+    return resolveVariantFromStream(mod, { loader: loader, mcVersion: mcVersion }, stream);
+  }
+
+  async function verifyProjectQuiet(
+    projectPath: string,
+    variantId: string | undefined,
+    onLine?: (line: string) => void,
+    opts?: { buildOnly?: boolean },
+  ) {
+    var resp = await fetchWithRetry("/api/verify-project", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectPath: projectPath,
+        variantId: variantId || undefined,
+        buildOnly: !!opts?.buildOnly,
+      }),
+    });
+    var stream = await consumeVariantGenerationStream(resp, onLine);
+    if (stream.exitCode !== 0) {
+      throw new Error(stream.lastErrorLine || ("验证失败（退出码 " + stream.exitCode + "）"));
+    }
   }
 
   async function generateVariantFromMatrix(mod, loader, mc) {
-    var source = pickSourceVariantForMc(mod, mc);
+    var source = pickSourceVariantForTarget(mod, loader, mc);
     if (!source) {
       showError("请先有至少一个变体作为源码来源");
       return;
@@ -930,12 +1050,15 @@ export function bootWorkbench(): void {
         else failed++;
       } else {
         pending++;
-        failed++;
       }
     });
     if (!cancelled && pending > 0) return;
-    if (cancelled) notify(batch.modName + " 构建已取消", "warning");
     state.buildBatch = null;
+    if (cancelled) {
+      notify(batch.modName + " 构建已取消", "warning");
+      return;
+    }
+    showBuildSummaryFeedback({ success: success, failed: failed, failedVariantIds: [] });
   }
 
   if (window.dmclBridge) {
@@ -1445,13 +1568,17 @@ export function bootWorkbench(): void {
     if (btn) btn.disabled = true;
     hideError();
     try {
-      var result = await api("/api/meta/refresh", { method: "POST" });
+      var result = await api("/api/meta/refresh", { method: "POST", body: { force: false } });
       delete state.versionsCache[state.selectedLoader];
       state.versionsCache[state.selectedLoader] =
         (result.loaderVersions && result.loaderVersions[state.selectedLoader]) || [];
       updateVersionsHint(false, result.updatedAt);
       await loadVersions(state.selectedLoader);
-      notify("版本列表已刷新");
+      notify(
+        result.mode === "full"
+          ? "版本列表已全量刷新"
+          : "版本列表已增量刷新（新增 " + (result.newReleaseCount || 0) + " 个 MC 版本）",
+      );
     } catch (e) {
       showError("刷新版本失败：" + (e as Error).message);
     } finally {
@@ -1531,23 +1658,22 @@ export function bootWorkbench(): void {
     retryCount = retryCount || 0;
     var mapSel = $("sel-mappings");
     if (!mapSel || !state.selectedMc || !state.selectedLoader) return;
-    mapSel.innerHTML = "<option>读取本地缓存…</option>";
-    mapSel.disabled = true;
+    if (retryCount === 0) {
+      mapSel.innerHTML = "<option>读取本地缓存…</option>";
+      mapSel.disabled = true;
+    }
     try {
       var data = await api(
         "/api/mappings/" + state.selectedLoader + "/" + encodeURIComponent(state.selectedMc)
       );
-      var options = data.options || [];
-      var unobfuscated = state.selectedLoader === "fabric" && isUnobfuscatedMc(state.selectedMc);
-      if (!unobfuscated && state.selectedLoader === "fabric" && options.length === 0 && retryCount < 3) {
-        mapSel.innerHTML = "<option>正在探测 Yarn 映射（" + (retryCount + 1) + "/3）…</option>";
-        await new Promise(function (r) { setTimeout(r, 1500 + retryCount * 500); });
-        return refreshMappings(retryCount + 1);
-      }
+      var options = (data.options || []).filter(function (o) { return o.available !== false; });
       if (!options.length) {
-        throw new Error(unobfuscated ? "此版本映射信息不可用" : "此版本暂无可用映射");
+        throw new Error("此版本暂无可用映射");
       }
-      applyMappingsData(data);
+      applyMappingsData(Object.assign({}, data, { options: options }));
+      if (data.pending && retryCount < 2) {
+        window.setTimeout(function () { void refreshMappings(retryCount + 1); }, 2000);
+      }
     } catch (e) {
       if (retryCount < 2) {
         await new Promise(function (r) { setTimeout(r, 1000); });
@@ -1737,7 +1863,7 @@ export function bootWorkbench(): void {
       }
       if (exitCode === -1) return;
       setPhase("done");
-      await loadMods();
+      await loadMods(true);
       showView("list");
       showCreateStep("step-loader");
       notify("模组已创建并完成验证流程");
@@ -2244,11 +2370,11 @@ export function bootWorkbench(): void {
     var btn = $("btn-settings-refresh-versions") as HTMLButtonElement | null;
     if (btn) btn.disabled = true;
     try {
-      await api("/api/meta/refresh", { method: "POST" });
+      await api("/api/meta/refresh", { method: "POST", body: { force: true } });
       state.versionsCache = {};
       invalidateDetailCache();
       await loadMetaCacheStatus();
-      notify("版本列表已刷新");
+      notify("版本列表已全量刷新（含全部 Forge MDK 重探）");
     } catch (e) {
       showError("刷新版本列表失败：" + (e as Error).message);
     } finally {
@@ -2528,6 +2654,7 @@ export function bootWorkbench(): void {
     if (event.key === "Escape") {
       event.preventDefault();
       if (visibleOverlay.id === "build-all-modal") closeBuildAllModal();
+      else if (visibleOverlay.id === "add-variant-modal") closeAddVariantModal();
       else if (visibleOverlay.id === "modal-overlay") closeModal();
       else visibleOverlay.classList.remove("visible");
       return;
@@ -2561,7 +2688,7 @@ export function bootWorkbench(): void {
         showView(view);
         if (view === "settings") loadSettings();
         if (view === "external") loadExternalView();
-        if (view === "list") loadMods();
+        if (view === "list") loadMods(true);
       }
     });
   });
@@ -2569,7 +2696,7 @@ export function bootWorkbench(): void {
   $("detail-back").addEventListener("click", function () {
     state.currentModId = null;
     showView("list");
-    loadMods();
+    loadMods(true);
   });
 
   $("btn-new-mod").addEventListener("click", function () {
@@ -2601,6 +2728,71 @@ export function bootWorkbench(): void {
     } catch (e) { showError(e.message); }
   });
 
+  async function deleteModWithProgress(modId: string, body: { deleteFiles?: boolean }) {
+    var mod = state.mods.find(function (m) { return m.id === modId; });
+    var variantCount = mod ? (mod.variants || []).length : 0;
+    var useStream = !!(body.deleteFiles && variantCount > 1);
+
+    if (useStream) {
+      showModal("正在删除模组", "准备删除 " + variantCount + " 个变体项目…");
+      var log = $("modal-log");
+      var closeBtn = $("modal-close") as HTMLButtonElement | null;
+      if (closeBtn) closeBtn.disabled = true;
+
+      var resp = await fetch("/api/mods/" + modId, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) {
+        closeModal();
+        var errData = await resp.json().catch(function () { return {}; }) as { error?: string };
+        throw new Error(errData.error || ("HTTP " + resp.status));
+      }
+
+      var reader = resp.body!.getReader();
+      var decoder = new TextDecoder();
+      var buffer = "";
+      var result: Record<string, unknown> | null = null;
+
+      while (true) {
+        var chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        var lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (var li = 0; li < lines.length; li++) {
+          var line = lines[li].trim();
+          if (!line) continue;
+          var evt = JSON.parse(line) as { type?: string; done?: number; total?: number; path?: string; error?: string };
+          if (evt.type === "progress" && log) {
+            var pct = evt.total ? Math.round((evt.done || 0) / evt.total * 100) : 0;
+            log.innerHTML = "";
+            var div = document.createElement("div");
+            div.textContent = "正在删除 " + (evt.done || 0) + "/" + evt.total + "（" + pct + "%）";
+            log.appendChild(div);
+            if (evt.path) {
+              var pathDiv = document.createElement("div");
+              pathDiv.className = "path";
+              pathDiv.textContent = evt.path;
+              log.appendChild(pathDiv);
+            }
+          } else if (evt.type === "error") {
+            closeModal();
+            throw new Error(evt.error || "删除失败");
+          } else if (evt.type === "done") {
+            result = evt;
+          }
+        }
+      }
+      closeModal();
+      if (closeBtn) closeBtn.disabled = false;
+      return result || {};
+    }
+
+    return api("/api/mods/" + modId, { method: "DELETE", body: body });
+  }
+
   $("btn-delete-mod").addEventListener("click", async function () {
     if (!state.currentModId) return;
     var mod = state.mods.find(function (m) { return m.id === state.currentModId; });
@@ -2610,15 +2802,15 @@ export function bootWorkbench(): void {
       " 个变体的项目文件夹：\n  · " + (paths || "(无变体)") +
       "\n\n此操作不可恢复。";
     if (!await confirmAction({ title: "永久删除模组", message: "将删除「" + mod.displayName + "」及其 " + mod.variants.length + " 个变体项目，此操作不可恢复。", detail: paths || "(无变体目录)", confirmLabel: "删除模组与文件", danger: true })) return;
+    var deletingId = state.currentModId;
     try {
-      var result = await api("/api/mods/" + state.currentModId, {
-        method: "DELETE",
-        body: { deleteFiles: true },
-      });
+      var result = await deleteModWithProgress(deletingId!, { deleteFiles: true }) as {
+        fileResult?: { deleted?: string[] };
+      };
       state.currentModId = null;
       invalidateDetailCache();
       showView("list");
-      loadMods();
+      await loadMods(true);
       var deleted = result.fileResult && result.fileResult.deleted
         ? result.fileResult.deleted.length : 0;
       notify("模组已删除（" + deleted + " 个文件夹已清除）");
@@ -2737,6 +2929,10 @@ export function bootWorkbench(): void {
         });
         if (exists) return;
         if (!isMatrixLoaderMcSupported(matrix, loader, mcVersion)) return;
+        var cell = (matrix.cells || []).find(function (c) {
+          return c.loader === loader && c.mcVersion === mcVersion;
+        });
+        if (cell && cell.status !== "available") return;
         pending.push({ loader: loader, mcVersion: mcVersion });
       });
     });
@@ -2789,6 +2985,7 @@ export function bootWorkbench(): void {
     if (summary) {
       summary.textContent = totalCount
         ? "将为「" + buildAllPendingMod.displayName + "」构建 " + totalCount + " 个变体（按 CPU 核数并行）："
+          + (totalCount >= 8 ? " 大批量时若失败增多，请在设置中降低 Gradle 构建并发（2～4）后重试失败项。" : "")
         : "当前筛选条件下没有可构建的变体。";
     }
     if (list) {
@@ -2831,6 +3028,8 @@ export function bootWorkbench(): void {
     };
     var targets = collectBuildAllTargets(buildAllPendingMod, buildAllPendingMatrix, filterOpts);
     var mod = buildAllPendingMod;
+    var buildAllSource = pickSourceVariant(mod);
+    var frozenBuildSourceId = buildAllSource ? buildAllSource.id : undefined;
     var genErrors: string[] = [];
 
     hideError();
@@ -2840,13 +3039,20 @@ export function bootWorkbench(): void {
       if (includeMissingLoaders && targets.pending.length) {
         for (var i = 0; i < targets.pending.length; i++) {
           var pending = targets.pending[i];
+          var already = (mod.variants || []).some(function (v) {
+            return v.loader === pending.loader && v.mcVersion === pending.mcVersion;
+          });
+          if (already) continue;
           setBuildAllBusy(
             true,
             "正在生成 " + (LOADER_LABELS[pending.loader] || pending.loader) + " "
               + pending.mcVersion + "（" + (i + 1) + "/" + targets.pending.length + "）…",
           );
           try {
-            await generateVariantQuiet(mod, pending.loader, pending.mcVersion);
+            await generateVariantQuiet(mod, pending.loader, pending.mcVersion, undefined, {
+              modUuid: modId,
+              sourceVariantId: frozenBuildSourceId,
+            });
             var detailData = await api("/api/mods/" + modId + "/detail") as {
               mod: Record<string, unknown>;
               matrix: Record<string, unknown>;
@@ -2932,8 +3138,541 @@ export function bootWorkbench(): void {
     if (e.target === $("build-all-modal")) closeBuildAllModal();
   });
 
-  $("btn-add-variant").addEventListener("click", function () {
-    notify("在支持矩阵选择 → 单元格即可生成变体");
+  var addVariantPendingMod: Record<string, unknown> | null = null;
+  var addVariantPendingMatrix: Record<string, unknown> | null = null;
+  var addVariantReturnFocus: HTMLElement | null = null;
+  var addVariantBusy = false;
+  var addVariantBatchJobId: string | null = null;
+  var addVariantPollTimer: ReturnType<typeof setInterval> | null = null;
+  var addVariantPollInFlight = false;
+  var addVariantTaskStates: Array<{
+    loader: string;
+    mcVersion: string;
+    status: "pending" | "running" | "done" | "failed";
+    message: string;
+  }> = [];
+  function stopAddVariantPolling() {
+    if (addVariantPollTimer) {
+      clearInterval(addVariantPollTimer);
+      addVariantPollTimer = null;
+    }
+  }
+
+  function mapBatchTargetStatus(status: string): "pending" | "running" | "done" | "failed" {
+    if (status === "done" || status === "skipped") return "done";
+    if (status === "failed" || status === "cancelled") return "failed";
+    if (status === "generating" || status === "verifying") return "running";
+    return "pending";
+  }
+
+  function syncAddVariantProgressFromJob(job: {
+    phase?: string;
+    targets?: Array<{ loader: string; mcVersion: string; status: string; message?: string; error?: string }>;
+    successes?: number;
+    failures?: number;
+    skipped?: number;
+    total?: number;
+    verifyParallel?: number;
+    gradleParallel?: number;
+  }) {
+    if (!job.targets?.length) return;
+    job.targets.forEach(function (target, index) {
+      if (!addVariantTaskStates[index]) return;
+      addVariantTaskStates[index].status = mapBatchTargetStatus(target.status);
+      addVariantTaskStates[index].message = target.error || target.message || "";
+    });
+    renderAddVariantProgress();
+    var summary = $("add-variant-summary");
+    if (summary) {
+      var phaseLabel = job.phase === "verify"
+        ? "构建验证中"
+        : job.phase === "generate" ? "生成项目中" : "收尾中";
+      summary.textContent = phaseLabel + " · 成功 " + (job.successes || 0)
+        + " / " + (job.total || job.targets.length)
+        + (job.skipped ? " · 跳过 " + job.skipped : "")
+        + (job.failures ? " · 失败 " + job.failures : "")
+        + (job.verifyParallel
+          ? " · 验证 worker " + job.verifyParallel + " 路 · Gradle "
+            + (job.gradleParallel ?? 1) + " 路"
+          : "");
+    }
+  }
+
+  function startAddVariantJobPolling(jobId: string, modId: string) {
+    stopAddVariantPolling();
+    addVariantBatchJobId = jobId;
+    addVariantPollTimer = setInterval(function () {
+      void (async function () {
+        if (addVariantPollInFlight) return;
+        addVariantPollInFlight = true;
+        try {
+          var data = await api("/api/batch-jobs/" + encodeURIComponent(jobId)) as {
+            job?: {
+              state: string;
+              phase?: string;
+              targets?: Array<{ loader: string; mcVersion: string; status: string; message?: string; error?: string }>;
+              successes?: number;
+              failures?: number;
+              skipped?: number;
+              total?: number;
+              verifyParallel?: number;
+              gradleParallel?: number;
+            };
+          };
+          var job = data.job;
+          if (!job) return;
+          syncAddVariantProgressFromJob(job);
+          if (job.state === "running" || job.state === "pending") return;
+
+          stopAddVariantPolling();
+          addVariantBatchJobId = null;
+          setAddVariantBusy(true, "完成：成功 " + (job.successes || 0)
+            + (job.skipped ? "，跳过 " + job.skipped : "")
+            + (job.failures ? "，失败 " + job.failures : ""));
+
+          closeAddVariantModal(true);
+          invalidateDetailCache(modId);
+          await refreshDetail({ force: true });
+          await loadMods(true);
+
+          var errors = (job.targets || [])
+            .filter(function (t) { return t.status === "failed"; })
+            .map(function (t) {
+              return (LOADER_LABELS[t.loader] || t.loader) + " " + t.mcVersion
+                + "：" + (t.error || t.message || "失败");
+            });
+
+          if (job.successes || job.skipped) {
+            notify("批量完成：成功 " + (job.successes || 0)
+              + (job.skipped ? "，跳过 " + job.skipped : "")
+              + (job.failures ? "，失败 " + job.failures : ""),
+              job.failures ? "warning" : "success");
+          } else {
+            showError("批量创建失败：" + (errors[0] || "未知错误"));
+          }
+          if (errors.length > 1) {
+            showModal("部分变体创建或验证失败", errors.join("\n"));
+          }
+          setAddVariantBusy(false);
+        } catch (e) {
+          /* 轮询失败时继续重试 */
+        } finally {
+          addVariantPollInFlight = false;
+        }
+      })();
+    }, 1200);
+  }
+
+  var ADD_VARIANT_LOADER_ORDER: Record<string, number> = {
+    fabric: 0,
+    forge: 1,
+    neoforge: 2,
+  };
+
+  type MatrixCell = { loader: string; mcVersion: string; status: string };
+
+  function collectMatrixAvailable(
+    matrix: Record<string, unknown> | null,
+    mod: Record<string, unknown> | null,
+    loader?: string,
+  ): Array<{ loader: string; mcVersion: string }> {
+    var cells = (matrix?.cells || []) as MatrixCell[];
+    var order = ((matrix?.versions || []) as string[]);
+    var registered = (mod?.variants || []) as Array<{ loader: string; mcVersion: string }>;
+    var out = cells.filter(function (c) {
+      if (c.status !== "available") return false;
+      if (loader && c.loader !== loader) return false;
+      if (registered.some(function (v) {
+        return v.loader === c.loader && v.mcVersion === c.mcVersion;
+      })) return false;
+      return true;
+    }).map(function (c) {
+      return { loader: c.loader, mcVersion: c.mcVersion };
+    });
+    out.sort(function (a, b) {
+      var lo = (ADD_VARIANT_LOADER_ORDER[a.loader] ?? 99) - (ADD_VARIANT_LOADER_ORDER[b.loader] ?? 99);
+      if (lo !== 0) return lo;
+      var ai = order.indexOf(a.mcVersion);
+      var bi = order.indexOf(b.mcVersion);
+      if (ai < 0 && bi < 0) return b.mcVersion.localeCompare(a.mcVersion);
+      if (ai < 0) return 1;
+      if (bi < 0) return -1;
+      return ai - bi;
+    });
+    return out;
+  }
+
+  function addVariantLoaderFilterValue(): string | undefined {
+    var loaderEl = $("add-variant-loader") as HTMLSelectElement | null;
+    var value = loaderEl ? loaderEl.value : "";
+    return value || undefined;
+  }
+
+  function setAddVariantProgressVisible(visible: boolean) {
+    var panel = $("add-variant-progress-panel") as HTMLElement | null;
+    var list = $("add-variant-list") as HTMLElement | null;
+    if (panel) panel.hidden = !visible;
+    if (list) list.hidden = visible;
+  }
+
+  function renderAddVariantProgress() {
+    var statsEl = $("add-variant-progress-stats");
+    var listEl = $("add-variant-progress-list");
+    if (!statsEl || !listEl) return;
+
+    var done = addVariantTaskStates.filter(function (t) { return t.status === "done"; }).length;
+    var failed = addVariantTaskStates.filter(function (t) { return t.status === "failed"; }).length;
+    var running = addVariantTaskStates.filter(function (t) { return t.status === "running"; }).length;
+    var pending = addVariantTaskStates.filter(function (t) { return t.status === "pending"; }).length;
+    statsEl.textContent = "进度 " + (done + failed) + "/" + addVariantTaskStates.length
+      + " · 进行中 " + running + " · 等待 " + pending
+      + (failed ? " · 失败 " + failed : "");
+
+    listEl.innerHTML = "";
+    addVariantTaskStates.forEach(function (task, index) {
+      var li = document.createElement("li");
+      li.className = "add-variant-progress-item";
+      li.dataset.status = task.status;
+
+      var badge = document.createElement("span");
+      badge.className = "add-variant-progress-badge";
+      badge.textContent = task.status === "done" ? "✓"
+        : task.status === "failed" ? "!"
+          : task.status === "running" ? "…"
+            : String(index + 1);
+
+      var copy = document.createElement("div");
+      copy.className = "add-variant-progress-copy";
+      var title = document.createElement("strong");
+      title.textContent = (LOADER_LABELS[task.loader] || task.loader) + " " + task.mcVersion;
+      var detail = document.createElement("span");
+      detail.textContent = task.message || (task.status === "pending" ? "等待中…" : "");
+      copy.appendChild(title);
+      copy.appendChild(detail);
+
+      li.appendChild(badge);
+      li.appendChild(copy);
+      listEl.appendChild(li);
+    });
+  }
+
+  function initAddVariantProgress(
+    targets: Array<{ loader: string; mcVersion: string }>,
+  ) {
+    addVariantTaskStates = targets.map(function (target) {
+      return {
+        loader: target.loader,
+        mcVersion: target.mcVersion,
+        status: "pending",
+        message: "等待中…",
+      };
+    });
+    setAddVariantProgressVisible(true);
+    renderAddVariantProgress();
+  }
+
+  function patchAddVariantTask(
+    index: number,
+    patch: Partial<{ status: "pending" | "running" | "done" | "failed"; message: string }>,
+  ) {
+    if (!addVariantTaskStates[index]) return;
+    if (patch.status) addVariantTaskStates[index].status = patch.status;
+    if (patch.message !== undefined) addVariantTaskStates[index].message = patch.message;
+    renderAddVariantProgress();
+  }
+
+  function resetAddVariantProgress() {
+    addVariantTaskStates = [];
+    setAddVariantProgressVisible(false);
+    var listEl = $("add-variant-progress-list");
+    var statsEl = $("add-variant-progress-stats");
+    if (listEl) listEl.innerHTML = "";
+    if (statsEl) statsEl.textContent = "";
+  }
+
+  function setAddVariantBusy(busy: boolean, message?: string) {
+    addVariantBusy = busy;
+    var confirmBtn = $("add-variant-confirm") as HTMLButtonElement | null;
+    var cancelBtn = $("add-variant-cancel") as HTMLButtonElement | null;
+    var options = $("add-variant-modal")?.querySelector(".add-variant-options");
+    if (confirmBtn) {
+      confirmBtn.disabled = busy;
+      confirmBtn.textContent = busy ? "创建并验证中…" : "开始创建并验证";
+    }
+    if (cancelBtn) cancelBtn.disabled = busy;
+    if (options) {
+      options.querySelectorAll("input, select").forEach(function (el) {
+        (el as HTMLInputElement).disabled = busy;
+      });
+    }
+    var list = $("add-variant-list");
+    if (list) {
+      list.querySelectorAll("input").forEach(function (el) {
+        (el as HTMLInputElement).disabled = busy;
+      });
+    }
+    if (busy && message) {
+      var summary = $("add-variant-summary");
+      if (summary) summary.textContent = message;
+    }
+  }
+
+  function refreshAddVariantModalList() {
+    if (!addVariantPendingMatrix) return;
+    var loaderFilter = addVariantLoaderFilterValue();
+    var available = collectMatrixAvailable(addVariantPendingMatrix, addVariantPendingMod, loaderFilter);
+    var list = $("add-variant-list");
+    var summary = $("add-variant-summary");
+    var selectAllEl = $("add-variant-select-all") as HTMLInputElement | null;
+    var confirmBtn = $("add-variant-confirm") as HTMLButtonElement | null;
+    var loaderLabel = loaderFilter ? LOADER_LABELS[loaderFilter] : "全部加载器";
+
+    if (summary) {
+      summary.textContent = available.length
+        ? "为「" + (addVariantPendingMod?.displayName || "模组") + "」创建并验证 "
+          + loaderLabel + " 变体，共 " + available.length + " 个可选："
+        : loaderLabel + " 当前没有可创建的版本（矩阵中已全部存在或不支持）。";
+    }
+
+    if (list) {
+      list.innerHTML = "";
+      if (!available.length) {
+        var empty = document.createElement("p");
+        empty.className = "add-variant-list-empty";
+        empty.textContent = loaderFilter
+          ? "请切换加载器，或在矩阵中查看其他可创建单元格。"
+          : "当前 Fabric / Forge / NeoForge 均没有可创建的版本。";
+        list.appendChild(empty);
+      } else {
+        available.forEach(function (item) {
+          var label = document.createElement("label");
+          label.className = "checkbox-row";
+          var input = document.createElement("input");
+          input.type = "checkbox";
+          input.checked = !!(selectAllEl && selectAllEl.checked);
+          input.dataset.loader = item.loader;
+          input.dataset.mc = item.mcVersion;
+          var span = document.createElement("span");
+          span.textContent = LOADER_LABELS[item.loader] + " " + item.mcVersion;
+          label.appendChild(input);
+          label.appendChild(span);
+          list.appendChild(label);
+        });
+      }
+    }
+
+    if (confirmBtn) confirmBtn.disabled = available.length === 0 || addVariantBusy;
+    if (selectAllEl) selectAllEl.disabled = available.length === 0 || addVariantBusy;
+  }
+
+  function openAddVariantModal(mod: Record<string, unknown>, matrix: Record<string, unknown>) {
+    if (!(mod.variants as unknown[])?.length) {
+      notify("请先至少有一个变体作为源码来源", "warning");
+      return;
+    }
+    resetAddVariantProgress();
+    addVariantReturnFocus = document.activeElement as HTMLElement | null;
+    addVariantPendingMod = mod;
+    addVariantPendingMatrix = matrix;
+
+    var loaderEl = $("add-variant-loader") as HTMLSelectElement | null;
+    var selectAllEl = $("add-variant-select-all") as HTMLInputElement | null;
+    if (selectAllEl) selectAllEl.checked = true;
+
+    var allCount = collectMatrixAvailable(matrix, mod).length;
+    if (loaderEl) loaderEl.value = allCount > 0 ? "" : "fabric";
+
+    refreshAddVariantModalList();
+    $("add-variant-modal")?.classList.add("visible");
+    requestAnimationFrame(function () {
+      (selectAllEl && !selectAllEl.disabled ? selectAllEl : $("add-variant-cancel"))?.focus();
+    });
+  }
+
+  function closeAddVariantModal(force?: boolean) {
+    if (addVariantBusy && addVariantBatchJobId && !force) {
+      notify("后台任务继续运行，再次点击「批量创建」可查看进度");
+      stopAddVariantPolling();
+      addVariantBatchJobId = null;
+      addVariantPendingMod = null;
+      addVariantPendingMatrix = null;
+      setAddVariantBusy(false);
+      resetAddVariantProgress();
+      $("add-variant-modal")?.classList.remove("visible");
+      addVariantReturnFocus?.focus();
+      addVariantReturnFocus = null;
+      return;
+    }
+    stopAddVariantPolling();
+    addVariantBatchJobId = null;
+    addVariantPendingMod = null;
+    addVariantPendingMatrix = null;
+    setAddVariantBusy(false);
+    resetAddVariantProgress();
+    $("add-variant-modal")?.classList.remove("visible");
+    addVariantReturnFocus?.focus();
+    addVariantReturnFocus = null;
+  }
+
+  function getSelectedAddVariantTargets(): Array<{ loader: string; mcVersion: string }> {
+    var list = $("add-variant-list");
+    if (!list) return [];
+    var targets: Array<{ loader: string; mcVersion: string }> = [];
+    list.querySelectorAll<HTMLInputElement>("input[type=checkbox][data-loader]").forEach(function (input) {
+      if (!input.checked) return;
+      targets.push({ loader: input.dataset.loader || "", mcVersion: input.dataset.mc || "" });
+    });
+    return targets;
+  }
+
+  async function confirmAddVariants() {
+    if (addVariantBusy || !addVariantPendingMod) return;
+    var modId = String(addVariantPendingMod.id || "");
+    if (!modId) {
+      notify("模组信息无效", "warning");
+      return;
+    }
+
+    var targets = getSelectedAddVariantTargets();
+    if (!targets.length) {
+      notify("请至少选择一个版本", "warning");
+      return;
+    }
+
+    var modName = String(addVariantPendingMod.displayName || "模组");
+    var batchSource = pickSourceVariant(addVariantPendingMod);
+    if (!batchSource) {
+      notify("请先至少有一个变体作为源码来源", "warning");
+      return;
+    }
+
+    var buildOnly = targets.length >= 8;
+    if (targets.length > 1 && !await confirmAction({
+      title: "批量创建变体",
+      message: "将为「" + modName + "」在服务端创建并验证 " + targets.length + " 个变体。",
+      detail: "后台持久化任务：先串行生成全部项目，再并行 Gradle 构建验证。"
+        + (buildOnly ? "\n大批量：仅 Gradle 构建（跳过客户端）。" : "\n含客户端启动验证。")
+        + "\nForge 版本会先探测 MDK 可用性，不可用的将跳过。"
+        + "\n任务写入 ~/.dmcl/batch-jobs/，关闭窗口也不会中断；重启应用可自动恢复。"
+        + "\n已存在的目录会跳过生成并继续验证。",
+      confirmLabel: "开始批量创建",
+    })) return;
+
+    hideError();
+    initAddVariantProgress(targets);
+    setAddVariantBusy(true, "正在启动后台批量任务（" + targets.length + " 个）…");
+
+    try {
+      var result = await api("/api/mods/" + encodeURIComponent(modId) + "/variants/batch", {
+        method: "POST",
+        body: {
+          sourceVariantId: batchSource.id,
+          targets: targets,
+          buildOnly: buildOnly,
+          modName: modName,
+        },
+      }) as { job?: { id: string; verifyParallel?: number; gradleParallel?: number } };
+
+      if (!result.job?.id) throw new Error("未收到任务 ID");
+      setAddVariantBusy(true, "后台任务已启动 · 验证 worker "
+        + (result.job.verifyParallel || 1) + " 路 · Gradle "
+        + (result.job.gradleParallel ?? 1) + " 路…");
+      startAddVariantJobPolling(result.job.id, modId);
+    } catch (e) {
+      showError("批量创建失败：" + (e as Error).message);
+      setAddVariantBusy(false);
+      refreshAddVariantModalList();
+    }
+  }
+
+  $("btn-add-variant").addEventListener("click", async function () {
+    if (!state.currentModId) return;
+    hideError();
+    try {
+      var active = await api("/api/batch-jobs/active") as { job?: { id: string; modUuid: string; targets: unknown[]; state: string } };
+      if (active.job && (active.job.state === "running" || active.job.state === "pending")) {
+        if (active.job.modUuid === state.currentModId) {
+          openAddVariantModalFromActiveJob(active.job);
+          return;
+        }
+        notify("已有其他模组的批量任务进行中（" + active.job.targets.length + " 个）", "warning");
+      }
+      var cached = state.detailCache[state.currentModId];
+      if (cached && !isDetailStale(cached)) {
+        openAddVariantModal(cached.mod, cached.matrix);
+        return;
+      }
+      var detailData = await api("/api/mods/" + state.currentModId + "/detail") as {
+        mod: Record<string, unknown>;
+        matrix: Record<string, unknown>;
+      };
+      openAddVariantModal(detailData.mod, detailData.matrix);
+    } catch (e) {
+      showError("加载模组信息失败：" + (e as Error).message);
+    }
+  });
+
+  function openAddVariantModalFromActiveJob(job: {
+    id: string;
+    targets: Array<{ loader: string; mcVersion: string; status: string; message?: string; error?: string }>;
+    phase?: string;
+    successes?: number;
+    failures?: number;
+    skipped?: number;
+    total?: number;
+    verifyParallel?: number;
+    gradleParallel?: number;
+  }) {
+    resetAddVariantProgress();
+    addVariantReturnFocus = document.activeElement as HTMLElement | null;
+    addVariantTaskStates = job.targets.map(function (t) {
+      return {
+        loader: t.loader,
+        mcVersion: t.mcVersion,
+        status: mapBatchTargetStatus(t.status),
+        message: t.error || t.message || "等待中…",
+      };
+    });
+    setAddVariantProgressVisible(true);
+    renderAddVariantProgress();
+    syncAddVariantProgressFromJob(job);
+    setAddVariantBusy(true, "后台任务进行中…");
+    $("add-variant-modal")?.classList.add("visible");
+    startAddVariantJobPolling(job.id, String(state.currentModId || ""));
+  }
+
+  $("add-variant-cancel")?.addEventListener("click", async function () {
+    if (addVariantBusy && addVariantBatchJobId) {
+      if (await confirmAction({
+        title: "取消批量任务",
+        message: "确定取消后台批量创建？",
+        detail: "已完成的变体会保留，进行中的项将停止。",
+        confirmLabel: "取消任务",
+      })) {
+        try {
+          await api("/api/batch-jobs/" + encodeURIComponent(addVariantBatchJobId) + "/cancel", { method: "POST" });
+          stopAddVariantPolling();
+          addVariantBatchJobId = null;
+          closeAddVariantModal(true);
+          notify("批量任务已取消");
+        } catch (e) {
+          showError("取消失败：" + (e as Error).message);
+        }
+      }
+      return;
+    }
+    closeAddVariantModal();
+  });
+  $("add-variant-confirm")?.addEventListener("click", function () { void confirmAddVariants(); });
+  $("add-variant-loader")?.addEventListener("change", refreshAddVariantModalList);
+  $("add-variant-select-all")?.addEventListener("change", function () {
+    var checked = ($("add-variant-select-all") as HTMLInputElement).checked;
+    $("add-variant-list")?.querySelectorAll<HTMLInputElement>("input[type=checkbox][data-loader]").forEach(function (input) {
+      input.checked = checked;
+    });
+  });
+  $("add-variant-modal")?.addEventListener("click", function (e) {
+    if (e.target === $("add-variant-modal")) closeAddVariantModal();
   });
 
   $("search-mods").addEventListener("input", function () {
@@ -3059,7 +3798,7 @@ export function bootWorkbench(): void {
   // ============ Init ============
 
   initCreateWizard();
-  loadMods();
+  loadMods(true);
   loadDefaultDir();
   updateQueueBar();
 

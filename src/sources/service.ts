@@ -6,7 +6,7 @@ import path from "node:path";
 import AdmZip from "adm-zip";
 import { downloadFile } from "../core/http.js";
 import { buildGradleEnv, killProcessTree, readJavaHomeFromProject, runGradleTask } from "../core/gradle.js";
-import { ensureProjectJdk } from "../core/jdk.js";
+import { ensureProjectToolchain } from "../core/toolchain.js";
 import { scaffoldProject, pascalCase } from "../core/scaffold.js";
 import { getMetaCache } from "../meta/meta-cache.js";
 import { getMappingsCache } from "../meta/mappings-cache.js";
@@ -1134,7 +1134,7 @@ class MinecraftSourceManager {
         this.currentProcess = null;
       }
     }
-    await ensureProjectJdk(jobPath, target.mcVersion, (line) => this.log(line), {
+    await ensureProjectToolchain(jobPath, target.mcVersion, (line) => this.log(line), {
       isCancelled: () => this.cancelRequested,
     });
     if (this.cancelRequested) throw new Error("已取消");

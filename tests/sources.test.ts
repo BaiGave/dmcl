@@ -9,6 +9,7 @@ import { MappingsCache, resolveMappings } from "../src/meta/mappings-cache.js";
 import { usesLegacyForgeMcp } from "../src/meta/mc-version.js";
 import {
   getMinecraftSourceUnitDir,
+  getSourceGradleHome,
   listMinecraftSourceEntries,
   sourceUnitReady,
 } from "../src/sources/paths.js";
@@ -161,8 +162,8 @@ describe("Minecraft source vault", () => {
     fs.writeFileSync(path.join(mcUnit, "READY"), generatedAt, "utf8");
 
     const dependencySources = path.join(
-      process.env.DMCL_HOME,
-      "cache", "source-gradle", "caches", "modules-2", "files-2.1",
+      getSourceGradleHome(),
+      "caches", "modules-2", "files-2.1",
       "com.example", "helper", "1.0.0", "source-hash", "helper-1.0.0-sources.jar",
     );
     fs.mkdirSync(path.dirname(dependencySources), { recursive: true });

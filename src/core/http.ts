@@ -37,26 +37,44 @@ export async function fetchText(url: string, opts?: FetchOpts): Promise<string> 
   return res.text();
 }
 
-export async function urlExists(url: string): Promise<boolean> {
-  // ???codeload.github.com ???? HEAD ???? 404???? GET ??
-  const signal = AbortSignal.timeout(15_000);
-  try {
-    const head = await fetch(url, { method: "HEAD", redirect: "follow", headers: { "user-agent": UA }, signal });
-    if (head.ok) return true;
-  } catch {
-    // ?????? GET ??
+export type UrlProbe = "ok" | "missing" | "unreachable";
+
+export async function probeUrl(url: string, opts?: FetchOpts): Promise<UrlProbe> {
+  const timeoutMs = opts?.timeoutMs ?? 12_000;
+  const retries = opts?.retries ?? 1;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const signal = AbortSignal.timeout(timeoutMs);
+    try {
+      const head = await fetch(url, {
+        method: "HEAD",
+        redirect: "follow",
+        headers: { "user-agent": UA },
+        signal,
+      });
+      if (head.ok) return "ok";
+      if (head.status === 404 || head.status === 410) return "missing";
+    } catch {
+      // HEAD 可能被 CDN 拒绝，继续 Range GET
+    }
+    try {
+      const res = await fetch(url, {
+        redirect: "follow",
+        headers: { "user-agent": UA, range: "bytes=0-0" },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      await res.body?.cancel();
+      if (res.ok) return "ok";
+      if (res.status === 404 || res.status === 410) return "missing";
+    } catch {
+      // retry
+    }
   }
-  try {
-    const res = await fetch(url, {
-      redirect: "follow",
-      headers: { "user-agent": UA, range: "bytes=0-0" },
-      signal,
-    });
-    await res.body?.cancel();
-    return res.ok;
-  } catch {
-    return false;
-  }
+  return "unreachable";
+}
+
+export async function urlExists(url: string, opts?: FetchOpts): Promise<boolean> {
+  return (await probeUrl(url, opts)) === "ok";
 }
 
 export async function downloadFile(url: string, dest: string): Promise<void> {

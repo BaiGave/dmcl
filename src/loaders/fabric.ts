@@ -88,6 +88,8 @@ export async function scaffoldFabric(opts: ProjectOptions, log: Logger): Promise
     // 不同分支的键名不同，两个都尝试
     fabric_version: apiVersion,
     fabric_api_version: apiVersion,
+    mod_id: opts.modId,
+    mod_name: opts.displayName,
     mod_version: "0.1.0",
     maven_group: opts.group,
     archives_base_name: opts.modId,

@@ -106,7 +106,7 @@
         </div>
         <div class="toolbar">
           <button class="btn btn-secondary btn-sm" id="btn-build-all" title="构建该模组全部变体（可选自动生成 Forge / NeoForge）">构建全部</button>
-          <button class="btn btn-secondary btn-sm" id="btn-add-variant">添加变体</button>
+          <button class="btn btn-secondary btn-sm" id="btn-add-variant" title="批量创建 Fabric / Forge / NeoForge 变体，复制源码并逐版本构建验证">批量创建</button>
           <details class="action-menu"><summary class="btn btn-quiet btn-sm" aria-label="更多模组操作"><span data-icon="more"></span></summary><div class="action-menu-popover"><button class="menu-danger" id="btn-delete-mod">删除模组与项目文件</button></div></details>
         </div>
       </div>
@@ -339,6 +339,37 @@
     <div class="btn-group dialog-actions">
       <button type="button" class="btn btn-secondary btn-sm" id="build-all-cancel">取消</button>
       <button type="button" class="btn btn-primary btn-sm" id="build-all-confirm">开始构建</button>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="add-variant-modal" role="presentation">
+  <div class="modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="add-variant-title" tabindex="-1">
+    <h3 id="add-variant-title">批量创建变体</h3>
+    <p class="build-all-summary" id="add-variant-summary"></p>
+    <div class="build-all-options add-variant-options">
+      <label class="select-row">
+        <span>加载器</span>
+        <select id="add-variant-loader">
+          <option value="">全部加载器</option>
+          <option value="fabric">Fabric</option>
+          <option value="forge">Forge</option>
+          <option value="neoforge">NeoForge</option>
+        </select>
+      </label>
+      <label class="checkbox-row">
+        <input type="checkbox" id="add-variant-select-all" checked>
+        <span>全选当前列表</span>
+      </label>
+    </div>
+    <div class="add-variant-list" id="add-variant-list"></div>
+    <div class="add-variant-progress-panel" id="add-variant-progress-panel" hidden>
+      <div class="add-variant-progress-stats" id="add-variant-progress-stats"></div>
+      <ul class="add-variant-progress-list" id="add-variant-progress-list"></ul>
+    </div>
+    <p class="add-variant-hint muted-placeholder">后台持久化批任务：支持 100+ 版本一次提交。先串行生成，再并行 Gradle 验证。任务保存在 ~/.dmcl/batch-jobs/，关窗或重启后可继续。</p>
+    <div class="btn-group dialog-actions">
+      <button type="button" class="btn btn-secondary btn-sm" id="add-variant-cancel">取消</button>
+      <button type="button" class="btn btn-primary btn-sm" id="add-variant-confirm">开始创建并验证</button>
     </div>
   </div>
 </div>

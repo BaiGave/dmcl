@@ -19,6 +19,7 @@
     "concurrency-settings.ts",
     "concurrency-governor.ts",
     "build-queue.ts",
+    "variant-batch-job.ts",
     "workspace-api.ts",
     "preload-bridge.ts"
   ]

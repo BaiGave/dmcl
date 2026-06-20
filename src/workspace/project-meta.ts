@@ -87,6 +87,9 @@ export function ensureModMeta(
 ): ModMetaFile {
   const existing = readModMeta(modDir);
   if (existing) return existing;
+  const dir = path.resolve(modDir);
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, MOD_META_FILE);
   const now = new Date().toISOString();
   const meta: ModMetaFile = {
     id: randomUUID(),
@@ -95,8 +98,36 @@ export function ensureModMeta(
     createdAt: now,
     updatedAt: now,
   };
-  writeModMeta(modDir, meta);
-  return meta;
+  try {
+    fs.writeFileSync(file, JSON.stringify(meta, null, 2), { flag: "wx" });
+    return meta;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "EEXIST") {
+      const raced = readModMeta(modDir);
+      if (raced) return raced;
+    }
+    throw err;
+  }
+}
+
+const TEMPLATE_MOD_LABELS = new Set(["Example Mod", "Modid", "ExampleMod"]);
+
+/** 登记变体时同步 dmcl.mod.json 显示名，避免并行创建时残留模板名 */
+export function syncModMetaIdentity(
+  modDir: string,
+  displayName: string,
+): ModMetaFile {
+  const existing = readModMeta(modDir);
+  if (!existing) {
+    return ensureModMeta(modDir, "", displayName);
+  }
+  if (existing.displayName !== displayName && TEMPLATE_MOD_LABELS.has(existing.displayName)) {
+    existing.displayName = displayName;
+    existing.updatedAt = new Date().toISOString();
+    writeModMeta(modDir, existing);
+  }
+  return existing;
 }
 
 export function ensureVariantMeta(

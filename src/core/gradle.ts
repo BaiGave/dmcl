@@ -1,6 +1,8 @@
-import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { spawn, type ChildProcess } from "node:child_process";
+import { ensureDmclHome, getDmclHome } from "./dmcl-home.js";
+import { detectJavaMajorAt } from "./jdk.js";
 
 export const CLIENT_SUCCESS = [
   /Sound engine started/i,
@@ -66,8 +68,28 @@ export function readJavaHomeFromProject(targetDir: string): string | null {
   }
 }
 
+/** 独立 Gradle 用户目录，避免用户全局 init.d 脚本破坏旧版 Gradle。 */
+export function getIsolatedGradleHome(targetDir?: string): string {
+  const base = path.join(getDmclHome(), "cache", "gradle");
+  if (!targetDir) {
+    fs.mkdirSync(base, { recursive: true });
+    return base;
+  }
+  const javaHome = readJavaHomeFromProject(targetDir);
+  let shard = "shared";
+  if (javaHome) {
+    const major = detectJavaMajorAt(javaHome);
+    if (major != null) shard = `jvm-${major}`;
+  }
+  const dir = path.join(base, shard);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 export function buildGradleEnv(targetDir: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
+  env.GRADLE_USER_HOME = getIsolatedGradleHome(targetDir);
+  ensureDmclHome();
   const javaHome = readJavaHomeFromProject(targetDir);
   if (javaHome) {
     env.JAVA_HOME = javaHome;

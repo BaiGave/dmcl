@@ -15,6 +15,7 @@ import {
   type JdkOptions,
 } from "./jdk.js";
 import { UA } from "./http.js";
+import { getIsolatedGradleHome } from "./gradle.js";
 
 const AUX_JDK_MAJOR = 8;
 const DMCL_MAVENIZER_JDK_DIR = "dmcl-jdk8";
@@ -136,7 +137,7 @@ export function usesForgeGradle(targetDir: string): boolean {
 }
 
 export function gradleUserHome(): string {
-  return path.resolve(process.env.GRADLE_USER_HOME ?? path.join(os.homedir(), ".gradle"));
+  return getIsolatedGradleHome();
 }
 
 export function forgeMavenizerCacheDir(): string {
@@ -581,11 +582,28 @@ async function resolveRemoteSha1(
   throw lastErr ?? new Error("Unable to resolve artifact SHA1");
 }
 
+/** 串行化 Forge Mavenizer 缓存写入，避免批任务并行预热竞态 */
+let forgeMavenizerTail: Promise<void> = Promise.resolve();
+
+export async function withForgeMavenizerLock<T>(work: () => Promise<T>): Promise<T> {
+  const previous = forgeMavenizerTail;
+  let release!: () => void;
+  const next = new Promise<void>((resolve) => { release = resolve; });
+  forgeMavenizerTail = next;
+  await previous;
+  try {
+    return await work();
+  } finally {
+    release();
+  }
+}
+
 export async function prewarmForgeMavenizerMcpTools(
   targetDir: string,
   log: JdkLogger,
   options?: JdkOptions,
 ): Promise<number> {
+  return withForgeMavenizerLock(async () => {
   if (!usesForgeGradle(targetDir)) return 0;
   const mcVersion = readMcVersionFromProject(targetDir);
   if (!mcVersion) return 0;
@@ -617,6 +635,7 @@ export async function prewarmForgeMavenizerMcpTools(
   let downloaded = 0;
   const seen = new Set<string>();
   for (const fn of Object.values(parsed.functions ?? {})) {
+    throwIfCancelled(options);
     if (!fn.version || !fn.repo || seen.has(fn.version)) continue;
     seen.add(fn.version);
     const relative = mavenArtifactPath(fn.version);
@@ -636,6 +655,7 @@ export async function prewarmForgeMavenizerMcpTools(
     downloaded++;
   }
   return downloaded;
+  });
 }
 
 async function runPool<T>(
@@ -658,6 +678,7 @@ export async function prewarmForgeMavenizerLibraries(
   log: JdkLogger,
   options?: JdkOptions,
 ): Promise<{ total: number; cached: number; downloaded: number; missing: number }> {
+  return withForgeMavenizerLock(async () => {
   if (!usesForgeGradle(targetDir)) return { total: 0, cached: 0, downloaded: 0, missing: 0 };
 
   const mcVersion = readMcVersionFromProject(targetDir);
@@ -705,6 +726,7 @@ export async function prewarmForgeMavenizerLibraries(
     downloaded,
     missing: missing.length - downloaded,
   };
+  });
 }
 
 export async function prewarmForgeSlimeLauncherAssets(
@@ -766,9 +788,12 @@ export async function prewarmForgeSlimeLauncherAssets(
   let cached = 0;
   const missing = objects.filter((asset) => {
     const dest = path.join(assetsDir, "objects", asset.hash.slice(0, 2), asset.hash);
-    if (fs.existsSync(dest) && fs.statSync(dest).size === asset.size) {
+    if (fs.existsSync(dest) && fs.statSync(dest).size === asset.size && sha1File(dest) === asset.hash) {
       cached++;
       return false;
+    }
+    if (fs.existsSync(dest)) {
+      try { fs.unlinkSync(dest); } catch { /* stale partial */ }
     }
     return true;
   });
@@ -829,6 +854,8 @@ async function linkOrCopyJdk(source: string, target: string): Promise<"linked" |
   }
 }
 
+let forgeMavenizerJdkSetupInflight: Promise<void> | null = null;
+
 export async function ensureForgeMavenizerJdkCache(
   targetDir: string,
   log: JdkLogger,
@@ -836,28 +863,42 @@ export async function ensureForgeMavenizerJdkCache(
 ): Promise<void> {
   if (!usesForgeGradle(targetDir)) return;
 
-  const jdkPath = await ensureCachedAuxJdk(log, options);
-  const cacheDir = forgeMavenizerCacheDir();
-  const target = path.join(cacheDir, DMCL_MAVENIZER_JDK_DIR);
+  const ensureReady = async (): Promise<void> => {
+    const cacheDir = forgeMavenizerCacheDir();
+    const target = path.join(cacheDir, DMCL_MAVENIZER_JDK_DIR);
 
-  if (detectJavaMajorAt(target) === AUX_JDK_MAJOR && fs.existsSync(javaExe(target))) {
-    log(`Forge Mavenizer auxiliary JDK ${AUX_JDK_MAJOR} is ready: ${target}`);
+    if (detectJavaMajorAt(target) === AUX_JDK_MAJOR && fs.existsSync(javaExe(target))) {
+      log(`Forge Mavenizer auxiliary JDK ${AUX_JDK_MAJOR} is ready: ${target}`);
+      await prewarmForgeMavenizerLibraries(targetDir, log, options);
+      return;
+    }
+
+    const jdkPath = await ensureCachedAuxJdk(log, options);
+    if (!isChildOf(cacheDir, target)) {
+      throw new Error(`Refusing to update Forge Mavenizer JDK outside cache: ${target}`);
+    }
+
+    await fs.promises.mkdir(cacheDir, { recursive: true });
+    await fs.promises.rm(target, { recursive: true, force: true });
+    const mode = await linkOrCopyJdk(jdkPath, target);
+
+    if (detectJavaMajorAt(target) !== AUX_JDK_MAJOR) {
+      throw new Error(`Forge Mavenizer auxiliary JDK ${AUX_JDK_MAJOR} was not installed correctly: ${target}`);
+    }
+
+    log(`Forge Mavenizer auxiliary JDK ${AUX_JDK_MAJOR} ${mode}: ${target}`);
     await prewarmForgeMavenizerLibraries(targetDir, log, options);
+  };
+
+  if (forgeMavenizerJdkSetupInflight) {
+    log("等待 Forge Mavenizer 辅助 JDK 初始化…");
+    await forgeMavenizerJdkSetupInflight;
+    await ensureReady();
     return;
   }
 
-  if (!isChildOf(cacheDir, target)) {
-    throw new Error(`Refusing to update Forge Mavenizer JDK outside cache: ${target}`);
-  }
-
-  await fs.promises.mkdir(cacheDir, { recursive: true });
-  await fs.promises.rm(target, { recursive: true, force: true });
-  const mode = await linkOrCopyJdk(jdkPath, target);
-
-  if (detectJavaMajorAt(target) !== AUX_JDK_MAJOR) {
-    throw new Error(`Forge Mavenizer auxiliary JDK ${AUX_JDK_MAJOR} was not installed correctly: ${target}`);
-  }
-
-  log(`Forge Mavenizer auxiliary JDK ${AUX_JDK_MAJOR} ${mode}: ${target}`);
-  await prewarmForgeMavenizerLibraries(targetDir, log, options);
+  forgeMavenizerJdkSetupInflight = ensureReady().finally(() => {
+    forgeMavenizerJdkSetupInflight = null;
+  });
+  await forgeMavenizerJdkSetupInflight;
 }

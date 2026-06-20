@@ -35,7 +35,7 @@ export {
   MOD_META_FILE,
   VARIANT_META_DIR,
 } from "./project-meta.js";
-export { syncWorkspaceFromDisk } from "./sync-from-disk.js";
+export { syncWorkspaceFromDisk, findVariantOnDisk, findModOnDisk } from "./sync-from-disk.js";
 export {
   getVersionVerificationSummary,
   readVersionVerificationIndex,
@@ -55,14 +55,27 @@ export type {
 export {
   buildVersionVerificationPlan,
   loadVersionVerificationPlan,
+  loadVersionVerificationContext,
+  summarizeMatrixCombinations,
   runAllVersionVerifications,
   runVersionVerificationBatch,
+  runVersionVerificationBatchParallel,
   verifyOneVersion,
+  verifyExistingProject,
 } from "./version-verifier.js";
+export {
+  applyVerificationFixes,
+  planVerificationFixes,
+} from "./verification-fix.js";
+export type { VerificationFixId, VerificationFixPlan, VerificationFixResult } from "./verification-fix.js";
 export type {
   VersionVerificationBatchResult,
   VersionVerificationPlanOptions,
   VersionVerificationRunOptions,
   VersionVerificationRunResult,
   VersionVerificationTarget,
+  VersionVerificationPlanContext,
+  MatrixCombinationCounts,
+  VerifyExistingProjectOptions,
+  VerifyExistingProjectResult,
 } from "./version-verifier.js";

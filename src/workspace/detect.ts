@@ -75,6 +75,7 @@ function detectMappings(loader: LoaderId, props: Record<string, string>, buildGr
 }
 
 import { pascalCase } from "../core/scaffold.js";
+import { readMcVersionFromProject } from "../core/jdk.js";
 /** 从磁盘上的 mod 项目目录解析元数据 */
 export function detectProject(projectPath: string): DetectedProject | null {
   const resolved = path.resolve(projectPath);
@@ -86,11 +87,7 @@ export function detectProject(projectPath: string): DetectedProject | null {
   const loader = detectLoader(resolved, props);
   if (!loader) return null;
 
-  let mcVersion = props.minecraft_version ?? "";
-  if (!mcVersion && loader === "forge") {
-    const m = buildGradle.match(/minecraft\s*\{\s*version\s*=\s*['"]([^'"]+)['"]/);
-    if (m) mcVersion = m[1];
-  }
+  let mcVersion = props.minecraft_version ?? readMcVersionFromProject(resolved) ?? "";
   if (!mcVersion) return null;
 
   const fabricMeta = loader === "fabric" ? readFabricModJson(resolved) : {};

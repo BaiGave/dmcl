@@ -63,30 +63,63 @@ export async function deleteVariantProject(
   } catch { /* 目录被占用时保留 */ }
 }
 
+const DELETE_CONCURRENCY = 4;
+
+async function deleteVariantPath(
+  resolved: string,
+  registeredPaths: string[],
+): Promise<void> {
+  assertDeletablePath(resolved, registeredPaths);
+  deleteVariantMeta(resolved);
+  await forceRemoveDir(resolved);
+  assertPathRemoved(resolved);
+}
+
+async function mapWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  let index = 0;
+  async function worker(): Promise<void> {
+    while (index < items.length) {
+      const i = index++;
+      await fn(items[i]);
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, () => worker()),
+  );
+}
+
 /** 删除模组下所有变体目录，并强制删除模组根目录 */
 export async function deleteModProjects(
   modId: string,
   variantPaths: string[],
+  onProgress?: (done: number, total: number, path: string) => void,
 ): Promise<{ deleted: string[]; skipped: string[] }> {
   const deleted: string[] = [];
   const skipped: string[] = [];
+  const normalized = variantPaths.map((p) => normalize(p));
+  let done = 0;
+  const total = normalized.length;
 
-  for (const p of variantPaths) {
-    const resolved = normalize(p);
+  await mapWithConcurrency(normalized, DELETE_CONCURRENCY, async (resolved) => {
     if (!fs.existsSync(resolved)) {
       skipped.push(resolved);
-      continue;
+      done++;
+      onProgress?.(done, total, resolved);
+      return;
     }
     try {
-      assertDeletablePath(resolved, variantPaths);
-      deleteVariantMeta(resolved);
-      await forceRemoveDir(resolved);
-      assertPathRemoved(resolved);
+      await deleteVariantPath(resolved, variantPaths);
       deleted.push(resolved);
     } catch {
       skipped.push(resolved);
     }
-  }
+    done++;
+    onProgress?.(done, total, resolved);
+  });
 
   const modDir = getModDir(modId);
   const projectsRoot = normalize(getProjectsRoot()) + path.sep;

@@ -8,6 +8,7 @@ import { assertValidModId } from "./validate.js";
 import {
   deleteModMeta,
   deleteVariantMeta,
+  syncModMetaIdentity,
   ensureModMeta,
   ensureVariantMeta,
   inferModDir,
@@ -18,7 +19,9 @@ import {
   type ModMetaFile,
   type VariantMetaFile,
 } from "./project-meta.js";
-import { syncWorkspaceFromDisk } from "./sync-from-disk.js";
+import { detectProject } from "./detect.js";
+import { findModOnDisk, syncWorkspaceFromDisk } from "./sync-from-disk.js";
+import { getProjectsRoot, getModDir } from "./paths.js";
 
 const DMCL_DIR = path.join(os.homedir(), ".dmcl");
 const WORKSPACE_FILE = path.join(DMCL_DIR, "workspace.json");
@@ -93,6 +96,7 @@ export class WorkspaceStore {
   }
 
   refresh(opts?: { force?: boolean }): ManagedMod[] {
+    this.pruneScanDirs();
     const now = Date.now();
     if (!opts?.force && now - this.lastRefreshAt < WorkspaceStore.REFRESH_DEBOUNCE_MS) {
       return this.modsCache;
@@ -100,6 +104,21 @@ export class WorkspaceStore {
     this.lastRefreshAt = now;
     this.modsCache = syncWorkspaceFromDisk(this);
     return this.modsCache;
+  }
+
+  /** 移除不存在目录、以及单元测试残留的 Temp 扫描路径 */
+  private pruneScanDirs(): void {
+    const tmpRoot = normalizePath(os.tmpdir());
+    const before = this.data.scanDirs.length;
+    this.data.scanDirs = this.data.scanDirs.filter((dir) => {
+      const resolved = path.resolve(dir);
+      if (!fs.existsSync(resolved)) return false;
+      const norm = normalizePath(resolved);
+      if (!norm.startsWith(tmpRoot + path.sep)) return true;
+      const base = path.basename(resolved).toLowerCase();
+      return !(base.startsWith("dmcl-sync-") || base.startsWith("dmcl-ws-"));
+    });
+    if (this.data.scanDirs.length !== before) this.save();
   }
 
   getData(): WorkspaceData {
@@ -180,8 +199,31 @@ export class WorkspaceStore {
     return true;
   }
 
-  findModByModId(modId: string): ManagedMod | undefined {
-    return this.modsCache.find((m) => m.modId === modId);
+  findModByModId(modId: string, preferredModDir?: string): ManagedMod | undefined {
+    const matches = this.modsCache.filter((m) => m.modId === modId);
+    if (matches.length === 0) {
+      return this.modsCache.find((m) =>
+        m.variants.some((v) => {
+          const modDir = inferModDir(v.projectPath, m.modId);
+          return path.basename(modDir) === modId;
+        }),
+      );
+    }
+    if (matches.length === 1) return matches[0];
+
+    if (preferredModDir) {
+      const pref = normalizePath(preferredModDir);
+      const preferred = matches.find((m) =>
+        m.variants.some((v) => normalizePath(inferModDir(v.projectPath, m.modId)) === pref),
+      );
+      if (preferred) return preferred;
+    }
+
+    const canonicalDir = normalizePath(getModDir(modId));
+    const canonical = matches.find((m) =>
+      m.variants.some((v) => normalizePath(v.projectPath).startsWith(canonicalDir + path.sep)),
+    );
+    return canonical ?? matches[0];
   }
 
   findVariantByPath(projectPath: string): { mod: ManagedMod; variant: ModVariant } | undefined {
@@ -227,14 +269,55 @@ export class WorkspaceStore {
     };
   }
 
+  /** 注册变体前：取消排除、确保扫描目录包含项目 */
+  prepareVariantRegistration(projectPath: string): void {
+    const resolved = path.resolve(projectPath);
+    this.removeExcludedPath(resolved);
+    const projectsRoot = path.resolve(getProjectsRoot());
+    if (!this.data.scanDirs.some((d) => path.resolve(d) === projectsRoot)) {
+      this.addScanDir(projectsRoot);
+    }
+  }
+
+  /** 按 uuid / modId / 磁盘扫描 / 项目路径解析模组 */
+  resolveMod(modUuid: string, projectPath?: string): ManagedMod | undefined {
+    let mod = this.getMod(modUuid) ?? findModOnDisk(this, modUuid);
+    if (!mod) mod = this.findModByModId(modUuid);
+    if (!mod && projectPath) {
+      const detected = detectProject(projectPath);
+      if (detected) {
+        const modDir = inferModDir(projectPath, detected.modId);
+        mod = this.findModByModId(detected.modId, modDir);
+      }
+    }
+    return mod;
+  }
+
   addVariant(modUuid: string, variant: Omit<ModVariant, "id" | "createdAt">): ModVariant {
-    const mod = this.getMod(modUuid);
+    this.prepareVariantRegistration(variant.projectPath);
+    this.refresh({ force: true });
+
+    const mod = this.resolveMod(modUuid, variant.projectPath);
     if (!mod) throw new Error(`模组不存在：${modUuid}`);
 
     const existing = mod.variants.find(
       (v) => v.loader === variant.loader && v.mcVersion === variant.mcVersion,
     );
-    if (existing) throw new Error(`变体已存在：${variant.loader} ${variant.mcVersion}`);
+    if (existing) {
+      if (normalizePath(existing.projectPath) === normalizePath(variant.projectPath)) {
+        const meta = readVariantMeta(variant.projectPath) ?? ensureVariantMeta(
+          variant.projectPath,
+          variant.source,
+        );
+        if (variant.buildStatus && meta.buildStatus !== variant.buildStatus) {
+          meta.buildStatus = variant.buildStatus;
+          writeVariantMeta(variant.projectPath, meta);
+        }
+        this.refresh({ force: true });
+        return this.getVariant(existing.id)?.variant ?? existing;
+      }
+      throw new Error(`变体已存在：${variant.loader} ${variant.mcVersion}`);
+    }
 
     const now = new Date().toISOString();
     const meta: VariantMetaFile = {
@@ -245,7 +328,7 @@ export class WorkspaceStore {
       createdAt: now,
     };
     writeVariantMeta(variant.projectPath, meta);
-    ensureModMeta(inferModDir(variant.projectPath, mod.modId), mod.modId, mod.displayName);
+    syncModMetaIdentity(inferModDir(variant.projectPath, mod.modId), mod.displayName);
 
     this.refresh({ force: true });
     const found = this.getVariant(meta.id);

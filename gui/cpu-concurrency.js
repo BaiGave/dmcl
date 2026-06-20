@@ -7,6 +7,7 @@ exports.parseWindowsPhysicalCores = parseWindowsPhysicalCores;
 exports.parseLinuxPhysicalCores = parseLinuxPhysicalCores;
 exports.normalizePhysicalCores = normalizePhysicalCores;
 exports.detectConcurrencyInfo = detectConcurrencyInfo;
+exports.recommendGradleBuildConcurrency = recommendGradleBuildConcurrency;
 exports.detectConcurrencyLimits = detectConcurrencyLimits;
 const node_fs_1 = __importDefault(require("node:fs"));
 const node_os_1 = __importDefault(require("node:os"));
@@ -73,11 +74,16 @@ function detectConcurrencyInfo() {
     return { physicalCores, logicalCores, maxConcurrency: physicalCores, source };
 }
 /** Gradle 缓存锁争用：高核数机器上限制同时 build 数，避免全员等锁 */
-const GRADLE_BUILD_CAP = 12;
+const GRADLE_BUILD_CAP = 6;
+/** 推荐 Gradle 并行构建数：约为物理核数一半，且不超过 GRADLE_BUILD_CAP */
+function recommendGradleBuildConcurrency(physicalCores) {
+    const half = Math.max(1, Math.ceil(physicalCores / 2));
+    return Math.max(1, Math.min(physicalCores, GRADLE_BUILD_CAP, half));
+}
 function detectConcurrencyLimits() {
     const base = detectConcurrencyInfo();
     const physical = base.physicalCores;
-    const gradleBuildConcurrency = Math.min(physical, GRADLE_BUILD_CAP);
+    const gradleBuildConcurrency = recommendGradleBuildConcurrency(physical);
     const clientConcurrency = physical >= 8 ? 2 : 1;
     return {
         ...base,

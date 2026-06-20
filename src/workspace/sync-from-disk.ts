@@ -35,21 +35,22 @@ export function syncWorkspaceFromDisk(store: WorkspaceStore): ManagedMod[] {
     }
   }
 
-  const byModId = new Map<string, DetectedProject[]>();
+  const byModDir = new Map<string, DetectedProject[]>();
   for (const p of detected) {
-    const list = byModId.get(p.modId) ?? [];
+    const modDir = path.resolve(inferModDir(p.projectPath, p.modId)).toLowerCase();
+    const list = byModDir.get(modDir) ?? [];
     list.push(p);
-    byModId.set(p.modId, list);
+    byModDir.set(modDir, list);
   }
 
   const mods: ManagedMod[] = [];
 
-  for (const [modId, projects] of byModId) {
-    const modDir = inferModDir(projects[0].projectPath, modId);
+  for (const [, projects] of byModDir) {
+    const modDir = inferModDir(projects[0].projectPath, projects[0].modId);
     const fileMeta = readModMeta(modDir);
     const modMeta = fileMeta ?? ensureModMeta(
       modDir,
-      modId,
+      projects[0].modId,
       projects[0].displayName,
     );
 
@@ -75,7 +76,7 @@ export function syncWorkspaceFromDisk(store: WorkspaceStore): ManagedMod[] {
 
     mods.push({
       id: modMeta.id,
-      modId,
+      modId: projects[0].modId,
       displayName: modMeta.displayName,
       description: modMeta.description,
       status: modMeta.status,

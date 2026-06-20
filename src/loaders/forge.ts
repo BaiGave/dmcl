@@ -1,9 +1,8 @@
 import path from "node:path";
-import { urlExists } from "../core/http.js";
 import { adaptTemplate, downloadAndExtract } from "../core/template.js";
 import { patchProperties } from "../core/fsutils.js";
 import { applyMappings } from "../core/mappings.js";
-import { forgeMdkUrl, pickForgeVersion } from "../meta/forge.js";
+import { pickForgeVersion, resolveForgeMdkUrl } from "../meta/forge.js";
 import type { Logger, ProjectOptions } from "../types.js";
 
 export async function scaffoldForge(opts: ProjectOptions, log: Logger): Promise<void> {
@@ -11,13 +10,26 @@ export async function scaffoldForge(opts: ProjectOptions, log: Logger): Promise<
   if (!forgeVersion) {
     throw new Error(`Forge 不支持 Minecraft ${opts.mcVersion}`);
   }
-  const url = forgeMdkUrl(opts.mcVersion, forgeVersion);
-  if (!(await urlExists(url))) {
-    throw new Error(`该版本的 Forge MDK 不存在（过老的版本不提供 MDK）：${url}`);
+  const resolved = await resolveForgeMdkUrl(
+    opts.mcVersion,
+    forgeVersion,
+    opts.mirror !== false,
+  );
+  if (resolved.status === "missing") {
+    throw new Error(
+      `Forge ${opts.mcVersion}-${forgeVersion} 的 MDK 在 Maven 上未发布（404）。`
+        + ` 若这是极新版本，可能尚未同步 MDK；可稍后再试或换 NeoForge。\n${resolved.tried[0]}`,
+    );
+  }
+  if (resolved.status === "unreachable") {
+    throw new Error(
+      `无法连接 Forge MDK 下载源（网络超时），并非版本过老。`
+        + ` 请检查网络/代理，或在设置中确认镜像已开启后重试。\n${resolved.tried.join("\n")}`,
+    );
   }
 
   log(`下载 Forge ${forgeVersion} MDK…`);
-  await downloadAndExtract(url, opts.targetDir);
+  await downloadAndExtract(resolved.url, opts.targetDir);
 
   // 必须先做全局占位符替换，再补丁 properties，否则新写入的值会被二次替换
   log("替换模板占位符…");

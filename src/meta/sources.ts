@@ -48,6 +48,11 @@ export const META_ENDPOINTS = {
     const full = `${mcVersion}-${forgeVersion}`;
     return `https://maven.minecraftforge.net/net/minecraftforge/forge/${full}/forge-${full}-mdk.zip`;
   },
+  /** 国内 BMCLAPI 镜像（与官方 Maven 路径一致） */
+  forgeMdkZipBmcl: (mcVersion: string, forgeVersion: string) => {
+    const full = `${mcVersion}-${forgeVersion}`;
+    return `https://bmclapi2.bangbang93.com/maven/net/minecraftforge/forge/${full}/forge-${full}-mdk.zip`;
+  },
 
   neoforgeVersions:
     "https://maven.neoforged.net/api/maven/versions/releases/net/neoforged/neoforge",
