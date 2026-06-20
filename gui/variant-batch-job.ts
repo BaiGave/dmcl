@@ -6,6 +6,7 @@ import { loadDist, repoDist } from "./dist-loader";
 import { getConcurrencyLimits } from "./concurrency-governor";
 import { getGradleCore } from "./gradle-core-bridge";
 import { withModVariantGenLock } from "./mod-gen-lock";
+import { saveVariantBuildLog } from "./build-queue";
 
 export type VariantBatchTargetStatus =
   | "pending"
@@ -530,6 +531,9 @@ async function processVariantBatchJob(jobId: string): Promise<void> {
 
         recomputeCounters(job!);
         persistJob(job!);
+        if (lines.length > 0 && target.projectPath) {
+          saveVariantBuildLog(target.projectPath, lines);
+        }
       }
     }
 

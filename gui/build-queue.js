@@ -13,6 +13,8 @@ exports.getQueueStatus = getQueueStatus;
 exports.cancelBuildQueue = cancelBuildQueue;
 exports.enqueueBuild = enqueueBuild;
 exports.enqueueBatch = enqueueBatch;
+exports.saveVariantBuildLog = saveVariantBuildLog;
+exports.getVariantBuildLogContent = getVariantBuildLogContent;
 exports.listLogs = listLogs;
 exports.readLog = readLog;
 const node_fs_1 = __importDefault(require("node:fs"));
@@ -253,6 +255,83 @@ function saveLog(projectPath, lines) {
     node_fs_1.default.writeFileSync(logPath, lines.join("\n"), "utf8");
     return logPath;
 }
+/** 供批任务 / 外部验证写入构建日志 */
+function saveVariantBuildLog(projectPath, lines) {
+    return saveLog(projectPath, lines);
+}
+const liveLogsByVariant = new Map();
+function appendLiveLog(variantId, line) {
+    let buf = liveLogsByVariant.get(variantId);
+    if (!buf) {
+        buf = [];
+        liveLogsByVariant.set(variantId, buf);
+    }
+    buf.push(line);
+    if (buf.length > 4000)
+        buf.splice(0, buf.length - 4000);
+}
+function clearLiveLog(variantId) {
+    liveLogsByVariant.delete(variantId);
+}
+function tailFile(filePath, maxLines = 300) {
+    if (!node_fs_1.default.existsSync(filePath))
+        return null;
+    try {
+        const text = node_fs_1.default.readFileSync(filePath, "utf8");
+        const lines = text.split(/\r?\n/);
+        return lines.slice(-maxLines).join("\n");
+    }
+    catch {
+        return null;
+    }
+}
+function findGradleFallbackLogs(projectPath) {
+    const resolved = node_path_1.default.resolve(projectPath);
+    const candidates = [
+        { label: "Gradle problems-report", file: node_path_1.default.join(resolved, "build", "reports", "problems", "problems-report.html") },
+        { label: "run/logs/latest.log", file: node_path_1.default.join(resolved, "run", "logs", "latest.log") },
+        { label: "runs/client/logs/latest.log", file: node_path_1.default.join(resolved, "runs", "client", "logs", "latest.log") },
+    ];
+    const out = [];
+    for (const c of candidates) {
+        const content = tailFile(c.file);
+        if (content?.trim())
+            out.push({ label: c.label, content });
+    }
+    return out;
+}
+async function getVariantBuildLogContent(variantId) {
+    const live = liveLogsByVariant.get(variantId);
+    if (live?.length) {
+        return {
+            content: live.join("\n"),
+            source: "live",
+            hint: "构建队列正在运行，显示实时输出",
+        };
+    }
+    const files = await listLogs(variantId);
+    if (files.length > 0) {
+        const content = await readLog(files[0].path, variantId);
+        if (content) {
+            return { content, source: "saved", fileName: files[0].name };
+        }
+    }
+    const projectPath = await resolveProjectPath(variantId);
+    if (projectPath) {
+        const fallbacks = findGradleFallbackLogs(projectPath);
+        if (fallbacks.length > 0) {
+            const combined = fallbacks.map((f) => `===== ${f.label} =====\n${f.content}`).join("\n\n");
+            return { content: combined, source: "fallback", fileName: fallbacks[0].label };
+        }
+        const logDir = variantLogsDir(projectPath);
+        return {
+            content: "",
+            source: "none",
+            hint: `暂无构建日志。完成一次构建后日志会保存到：\n${logDir}`,
+        };
+    }
+    return { content: "", source: "none", hint: "未找到该变体项目路径" };
+}
 async function resolveProjectPath(variantId) {
     try {
         const mod = await (0, dist_loader_1.loadDist)((0, dist_loader_1.repoDist)("workspace", "store.js"));
@@ -299,8 +378,10 @@ async function readLog(logPath, variantId) {
 }
 async function executeJob(job, runner) {
     const lines = [];
+    clearLiveLog(job.variantId);
     const logLine = (line) => {
         lines.push(line);
+        appendLiveLog(job.variantId, line);
         emit({ type: "progress", job, line });
     };
     let success = false;
@@ -333,6 +414,7 @@ async function executeJob(job, runner) {
         success = false;
     }
     saveLog(job.projectPath, lines);
+    clearLiveLog(job.variantId);
     const alreadyFinalized = cancelledJobIds.has(job.id);
     if (!alreadyFinalized) {
         if (cancelled || runner.isCancelled())

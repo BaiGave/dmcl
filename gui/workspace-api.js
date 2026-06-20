@@ -876,6 +876,14 @@ async function handleWorkspaceApi(req, res, urlPath, method) {
         json(res, { jobId, queue: (0, build_queue_1.getQueueStatus)() });
         return true;
     }
+    // GET /api/variants/:id/log — 最新构建日志（含实时 / 已保存 / Gradle 回退）
+    const logContentMatch = urlPath.match(/^\/api\/variants\/([^/]+)\/log$/);
+    if (logContentMatch && method === "GET") {
+        const variantId = decodeURIComponent(logContentMatch[1]);
+        const payload = await (0, build_queue_1.getVariantBuildLogContent)(variantId);
+        json(res, payload);
+        return true;
+    }
     // GET /api/variants/:id/logs
     const logsMatch = urlPath.match(/^\/api\/variants\/([^/]+)\/logs$/);
     if (logsMatch && method === "GET") {

@@ -1,6 +1,6 @@
 import { state, pathRefreshTimer, setPathRefreshTimer } from "./state";
 import { LOADERS, LOADER_LABELS, STATUS_LABELS, SIDE_LAYOUT_HINTS, SIDE_LAYOUT_HOVER_TIPS, SIDE_LAYOUT_OPTIONS } from "./constants";
-import { $, showError, hideError, setText, notify, showView, esc, showModal, closeModal, confirmAction } from "./dom";
+import { $, showError, hideError, setText, notify, showView, esc, showModal, showLogModal, getLastLogModalText, closeModal, confirmAction } from "./dom";
 import { hydrateIcons, icon, loaderIcon } from "./icons";
 import { api, fetchWithRetry } from "./api";
 
@@ -796,7 +796,9 @@ export function bootWorkbench(): void {
           e.stopPropagation();
           var menu = btn.closest("details");
           if (menu) menu.removeAttribute("open");
-          variantAction(mod.id, v, btn.dataset.action);
+          void variantAction(mod.id, v, btn.dataset.action).catch(function (err) {
+            showError("操作失败：" + ((err as Error).message || String(err)));
+          });
         });
       });
       list.appendChild(item);
@@ -890,13 +892,24 @@ export function bootWorkbench(): void {
       await api("/api/open-cursor", { method: "POST", body: { path: variant.projectPath } });
       notify("已请求用 Cursor 打开项目");
     } else if (action === "logs") {
-      var logs = await api("/api/variants/" + variant.id + "/logs");
-      if (!logs.logs || !logs.logs.length) {
-        showModal("构建日志", "暂无日志");
+      var logPayload = await api("/api/variants/" + encodeURIComponent(variant.id) + "/log") as {
+        content?: string;
+        source?: string;
+        fileName?: string;
+        hint?: string;
+      };
+      var body = (logPayload.content || "").trim();
+      if (!body) {
+        showLogModal(
+          "构建日志 — " + (LOADER_LABELS[variant.loader] || variant.loader) + " " + variant.mcVersion,
+          logPayload.hint || "暂无构建日志。请先执行一次「构建」，或等待当前队列任务完成。",
+        );
         return;
       }
-      var content = await api("/api/logs?path=" + encodeURIComponent(logs.logs[0].path) + "&variantId=" + encodeURIComponent(variant.id));
-      showModal("构建日志 — " + logs.logs[0].name, content.content || "(空)");
+      var title = "构建日志 — " + (LOADER_LABELS[variant.loader] || variant.loader) + " " + variant.mcVersion;
+      if (logPayload.source === "live") title += "（实时）";
+      else if (logPayload.fileName) title += " · " + logPayload.fileName;
+      showLogModal(title, body);
     } else if (action === "relocate") {
       var pick = await api("/api/select-dir");
       if (!pick.path) return;
@@ -2627,6 +2640,27 @@ export function bootWorkbench(): void {
 
   $("modal-close").addEventListener("click", function () {
     closeModal();
+  });
+  $("modal-copy-log")?.addEventListener("click", async function () {
+    var text = getLastLogModalText();
+    if (!text.trim()) {
+      notify("没有可复制的内容", "warning");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      notify("日志已复制到剪贴板", "success");
+    } catch {
+      var logEl = $("modal-log");
+      if (logEl) {
+        var range = document.createRange();
+        range.selectNodeContents(logEl);
+        var sel = window.getSelection();
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+        notify("自动复制失败，请 Ctrl+C 复制已选中文本", "warning");
+      }
+    }
   });
   $("modal-source-cancel")?.addEventListener("click", async function () {
     var button = $("modal-source-cancel") as HTMLButtonElement;

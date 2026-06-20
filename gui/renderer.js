@@ -217,22 +217,32 @@
     return d.innerHTML;
   }
   function showModal(title, content) {
+    showLogModal(title, content);
+  }
+  function showLogModal(title, content, options) {
     const titleEl = $("modal-title");
     const log = $("modal-log");
     const overlay = $("modal-overlay");
+    const copyBtn = $("modal-copy-log");
+    const sourceCancel = $("modal-source-cancel");
+    if (sourceCancel) sourceCancel.hidden = true;
+    lastLogModalText = content;
     if (titleEl) titleEl.textContent = title;
     if (log) {
-      log.innerHTML = "";
-      content.split("\n").forEach((line) => {
-        const div = document.createElement("div");
-        div.textContent = line;
-        log.appendChild(div);
-      });
+      log.textContent = content;
+      log.scrollTop = 0;
+    }
+    if (copyBtn) {
+      copyBtn.hidden = !content.trim();
+      copyBtn.textContent = options?.copyLabel ?? "\u590D\u5236\u5168\u90E8";
     }
     logModalReturnFocus = document.activeElement;
     overlay?.classList.add("visible");
     const modal = overlay?.querySelector(".modal");
-    requestAnimationFrame(() => modal?.focus());
+    requestAnimationFrame(() => (copyBtn && !copyBtn.hidden ? copyBtn : modal)?.focus());
+  }
+  function getLastLogModalText() {
+    return lastLogModalText;
   }
   function closeModal() {
     $("modal-overlay")?.classList.remove("visible");
@@ -283,11 +293,12 @@
       requestAnimationFrame(() => cancel.focus());
     });
   }
-  var logModalReturnFocus, confirmReturnFocus;
+  var lastLogModalText, logModalReturnFocus, confirmReturnFocus;
   var init_dom = __esm({
     "gui/renderer-src/dom.ts"() {
       "use strict";
       init_icons();
+      lastLogModalText = "";
       logModalReturnFocus = null;
       confirmReturnFocus = null;
     }
@@ -1015,7 +1026,9 @@
             e.stopPropagation();
             var menu = btn.closest("details");
             if (menu) menu.removeAttribute("open");
-            variantAction(mod.id, v, btn.dataset.action);
+            void variantAction(mod.id, v, btn.dataset.action).catch(function(err) {
+              showError("\u64CD\u4F5C\u5931\u8D25\uFF1A" + (err.message || String(err)));
+            });
           });
         });
         list.appendChild(item);
@@ -1102,13 +1115,19 @@
         await api("/api/open-cursor", { method: "POST", body: { path: variant.projectPath } });
         notify("\u5DF2\u8BF7\u6C42\u7528 Cursor \u6253\u5F00\u9879\u76EE");
       } else if (action === "logs") {
-        var logs = await api("/api/variants/" + variant.id + "/logs");
-        if (!logs.logs || !logs.logs.length) {
-          showModal("\u6784\u5EFA\u65E5\u5FD7", "\u6682\u65E0\u65E5\u5FD7");
+        var logPayload = await api("/api/variants/" + encodeURIComponent(variant.id) + "/log");
+        var body = (logPayload.content || "").trim();
+        if (!body) {
+          showLogModal(
+            "\u6784\u5EFA\u65E5\u5FD7 \u2014 " + (LOADER_LABELS[variant.loader] || variant.loader) + " " + variant.mcVersion,
+            logPayload.hint || "\u6682\u65E0\u6784\u5EFA\u65E5\u5FD7\u3002\u8BF7\u5148\u6267\u884C\u4E00\u6B21\u300C\u6784\u5EFA\u300D\uFF0C\u6216\u7B49\u5F85\u5F53\u524D\u961F\u5217\u4EFB\u52A1\u5B8C\u6210\u3002"
+          );
           return;
         }
-        var content = await api("/api/logs?path=" + encodeURIComponent(logs.logs[0].path) + "&variantId=" + encodeURIComponent(variant.id));
-        showModal("\u6784\u5EFA\u65E5\u5FD7 \u2014 " + logs.logs[0].name, content.content || "(\u7A7A)");
+        var title = "\u6784\u5EFA\u65E5\u5FD7 \u2014 " + (LOADER_LABELS[variant.loader] || variant.loader) + " " + variant.mcVersion;
+        if (logPayload.source === "live") title += "\uFF08\u5B9E\u65F6\uFF09";
+        else if (logPayload.fileName) title += " \xB7 " + logPayload.fileName;
+        showLogModal(title, body);
       } else if (action === "relocate") {
         var pick = await api("/api/select-dir");
         if (!pick.path) return;
@@ -2766,6 +2785,27 @@
     }
     $("modal-close").addEventListener("click", function() {
       closeModal();
+    });
+    $("modal-copy-log")?.addEventListener("click", async function() {
+      var text = getLastLogModalText();
+      if (!text.trim()) {
+        notify("\u6CA1\u6709\u53EF\u590D\u5236\u7684\u5185\u5BB9", "warning");
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(text);
+        notify("\u65E5\u5FD7\u5DF2\u590D\u5236\u5230\u526A\u8D34\u677F", "success");
+      } catch {
+        var logEl = $("modal-log");
+        if (logEl) {
+          var range = document.createRange();
+          range.selectNodeContents(logEl);
+          var sel = window.getSelection();
+          sel?.removeAllRanges();
+          sel?.addRange(range);
+          notify("\u81EA\u52A8\u590D\u5236\u5931\u8D25\uFF0C\u8BF7 Ctrl+C \u590D\u5236\u5DF2\u9009\u4E2D\u6587\u672C", "warning");
+        }
+      }
     });
     $("modal-source-cancel")?.addEventListener("click", async function() {
       var button = $("modal-source-cancel");

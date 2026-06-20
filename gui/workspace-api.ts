@@ -11,6 +11,8 @@ import {
   isVariantQueued,
   listLogs,
   readLog,
+  getVariantBuildLogContent,
+  saveVariantBuildLog,
 } from "./build-queue";
 import {
   cancelVariantBatchJob,
@@ -949,6 +951,15 @@ export async function handleWorkspaceApi(
       mcVersion: found.variant.mcVersion,
     });
     json(res, { jobId, queue: getQueueStatus() });
+    return true;
+  }
+
+  // GET /api/variants/:id/log — 最新构建日志（含实时 / 已保存 / Gradle 回退）
+  const logContentMatch = urlPath.match(/^\/api\/variants\/([^/]+)\/log$/);
+  if (logContentMatch && method === "GET") {
+    const variantId = decodeURIComponent(logContentMatch[1]);
+    const payload = await getVariantBuildLogContent(variantId);
+    json(res, payload);
     return true;
   }
 

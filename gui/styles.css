@@ -373,7 +373,7 @@ code { color: var(--accent-hover); font-family: var(--font-code); }
 .phase-bar { display: grid; grid-template-columns: repeat(4,1fr); gap: 7px; margin-bottom: 15px; }
 .phase { min-height: 36px; display: grid; place-items: center; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); color: var(--text-tertiary); background: var(--surface-2); font-size: 10px; transition: color var(--motion-ui), border-color var(--motion-ui), background var(--motion-ui); }
 .phase.active { color: var(--status-warning); border-color: rgba(215,166,78,.4); background: rgba(215,166,78,.07); }.phase.done { color: var(--status-success); border-color: rgba(120,189,88,.32); background: rgba(120,189,88,.06); }
-.log { height: 300px; overflow: auto; padding: 11px 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius); color: #34423a; background: #f8faf8; font: 11px/1.65 var(--font-code); }
+.log { height: 300px; overflow: auto; padding: 11px 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius); color: #34423a; background: #f8faf8; font: 11px/1.65 var(--font-code); white-space: pre-wrap; word-break: break-word; }
 .log-err { color: var(--status-danger); }.log-ok { color: var(--status-success); }
 
 /* External and settings */

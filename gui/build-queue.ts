@@ -312,6 +312,94 @@ function saveLog(projectPath: string, lines: string[]): string | null {
   return logPath;
 }
 
+/** 供批任务 / 外部验证写入构建日志 */
+export function saveVariantBuildLog(projectPath: string, lines: string[]): string | null {
+  return saveLog(projectPath, lines);
+}
+
+const liveLogsByVariant = new Map<string, string[]>();
+
+function appendLiveLog(variantId: string, line: string): void {
+  let buf = liveLogsByVariant.get(variantId);
+  if (!buf) {
+    buf = [];
+    liveLogsByVariant.set(variantId, buf);
+  }
+  buf.push(line);
+  if (buf.length > 4000) buf.splice(0, buf.length - 4000);
+}
+
+function clearLiveLog(variantId: string): void {
+  liveLogsByVariant.delete(variantId);
+}
+
+function tailFile(filePath: string, maxLines = 300): string | null {
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    const text = fs.readFileSync(filePath, "utf8");
+    const lines = text.split(/\r?\n/);
+    return lines.slice(-maxLines).join("\n");
+  } catch {
+    return null;
+  }
+}
+
+function findGradleFallbackLogs(projectPath: string): Array<{ label: string; content: string }> {
+  const resolved = path.resolve(projectPath);
+  const candidates: Array<{ label: string; file: string }> = [
+    { label: "Gradle problems-report", file: path.join(resolved, "build", "reports", "problems", "problems-report.html") },
+    { label: "run/logs/latest.log", file: path.join(resolved, "run", "logs", "latest.log") },
+    { label: "runs/client/logs/latest.log", file: path.join(resolved, "runs", "client", "logs", "latest.log") },
+  ];
+  const out: Array<{ label: string; content: string }> = [];
+  for (const c of candidates) {
+    const content = tailFile(c.file);
+    if (content?.trim()) out.push({ label: c.label, content });
+  }
+  return out;
+}
+
+export async function getVariantBuildLogContent(variantId: string): Promise<{
+  content: string;
+  source: "live" | "saved" | "fallback" | "none";
+  fileName?: string;
+  hint?: string;
+}> {
+  const live = liveLogsByVariant.get(variantId);
+  if (live?.length) {
+    return {
+      content: live.join("\n"),
+      source: "live",
+      hint: "构建队列正在运行，显示实时输出",
+    };
+  }
+
+  const files = await listLogs(variantId);
+  if (files.length > 0) {
+    const content = await readLog(files[0].path, variantId);
+    if (content) {
+      return { content, source: "saved", fileName: files[0].name };
+    }
+  }
+
+  const projectPath = await resolveProjectPath(variantId);
+  if (projectPath) {
+    const fallbacks = findGradleFallbackLogs(projectPath);
+    if (fallbacks.length > 0) {
+      const combined = fallbacks.map((f) => `===== ${f.label} =====\n${f.content}`).join("\n\n");
+      return { content: combined, source: "fallback", fileName: fallbacks[0].label };
+    }
+    const logDir = variantLogsDir(projectPath);
+    return {
+      content: "",
+      source: "none",
+      hint: `暂无构建日志。完成一次构建后日志会保存到：\n${logDir}`,
+    };
+  }
+
+  return { content: "", source: "none", hint: "未找到该变体项目路径" };
+}
+
 async function resolveProjectPath(variantId: string): Promise<string | null> {
   try {
     const mod = await loadDist(repoDist("workspace", "store.js"));
@@ -356,8 +444,10 @@ export async function readLog(logPath: string, variantId: string): Promise<strin
 
 async function executeJob(job: BuildJob, runner: GradleRunner): Promise<void> {
   const lines: string[] = [];
+  clearLiveLog(job.variantId);
   const logLine = (line: string) => {
     lines.push(line);
+    appendLiveLog(job.variantId, line);
     emit({ type: "progress", job, line });
   };
 
@@ -388,6 +478,7 @@ async function executeJob(job: BuildJob, runner: GradleRunner): Promise<void> {
   }
 
   saveLog(job.projectPath, lines);
+  clearLiveLog(job.variantId);
   const alreadyFinalized = cancelledJobIds.has(job.id);
   if (!alreadyFinalized) {
     if (cancelled || runner.isCancelled()) success = false;

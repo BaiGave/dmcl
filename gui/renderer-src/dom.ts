@@ -61,22 +61,36 @@ export function esc(s: string): string {
 }
 
 export function showModal(title: string, content: string): void {
+  showLogModal(title, content);
+}
+
+let lastLogModalText = "";
+
+export function showLogModal(title: string, content: string, options?: { copyLabel?: string }): void {
   const titleEl = $("modal-title");
   const log = $("modal-log");
   const overlay = $("modal-overlay");
+  const copyBtn = $("modal-copy-log") as HTMLButtonElement | null;
+  const sourceCancel = $("modal-source-cancel") as HTMLButtonElement | null;
+  if (sourceCancel) sourceCancel.hidden = true;
+  lastLogModalText = content;
   if (titleEl) titleEl.textContent = title;
   if (log) {
-    log.innerHTML = "";
-    content.split("\n").forEach((line) => {
-      const div = document.createElement("div");
-      div.textContent = line;
-      log.appendChild(div);
-    });
+    log.textContent = content;
+    log.scrollTop = 0;
+  }
+  if (copyBtn) {
+    copyBtn.hidden = !content.trim();
+    copyBtn.textContent = options?.copyLabel ?? "复制全部";
   }
   logModalReturnFocus = document.activeElement as HTMLElement | null;
   overlay?.classList.add("visible");
   const modal = overlay?.querySelector<HTMLElement>(".modal");
-  requestAnimationFrame(() => modal?.focus());
+  requestAnimationFrame(() => (copyBtn && !copyBtn.hidden ? copyBtn : modal)?.focus());
+}
+
+export function getLastLogModalText(): string {
+  return lastLogModalText;
 }
 
 let logModalReturnFocus: HTMLElement | null = null;
@@ -141,4 +155,3 @@ export function confirmAction(options: ConfirmActionOptions): Promise<boolean> {
     requestAnimationFrame(() => cancel.focus());
   });
 }
-import { icon } from "./icons";

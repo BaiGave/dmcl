@@ -17,6 +17,7 @@ const dist_loader_1 = require("./dist-loader");
 const concurrency_governor_1 = require("./concurrency-governor");
 const gradle_core_bridge_1 = require("./gradle-core-bridge");
 const mod_gen_lock_1 = require("./mod-gen-lock");
+const build_queue_1 = require("./build-queue");
 let jobsDir = null;
 let runningJobId = null;
 /** 真正在跑的 processor（cancel 后仍保持，直到 finally） */
@@ -454,6 +455,9 @@ async function processVariantBatchJob(jobId) {
                 }
                 recomputeCounters(job);
                 persistJob(job);
+                if (lines.length > 0 && target.projectPath) {
+                    (0, build_queue_1.saveVariantBuildLog)(target.projectPath, lines);
+                }
             }
         }
         await Promise.all(Array.from({ length: verifyParallel }, () => verifyWorker()));
