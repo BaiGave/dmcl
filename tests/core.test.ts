@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { injectBuildscriptMirrors } from "../src/core/maven.js";
-import { mojangLibraryAppliesToCurrentOs } from "../src/core/forge-mavenizer.js";
+import { mojangLibraryAppliesToCurrentOs, collectMavenizerLibraryArtifacts } from "../src/core/forge-mavenizer.js";
 import { pascalCase } from "../src/core/scaffold.js";
 import { serializeMatrixResult } from "../src/workspace/matrix.js";
 import { inferModDir } from "../src/workspace/project-meta.js";
@@ -55,6 +55,34 @@ describe("Mojang library OS rules", () => {
     assert.equal(mojangLibraryAppliesToCurrentOs({
       rules: [{ action: "allow", os: { name: foreignOs } }],
     }), false);
+  });
+
+  it("collects all platform artifacts for Forge Mavenizer prewarm", () => {
+    const versionJson = {
+      libraries: [
+        {
+          name: "com.example:core:1.0",
+          downloads: { artifact: { path: "com/example/core/1.0/core-1.0.jar", sha1: "a", size: 1, url: "https://example/a.jar" } },
+        },
+        {
+          name: "com.example:core:1.0:natives-linux",
+          rules: [{ action: "allow", os: { name: "linux" } }],
+          downloads: { artifact: { path: "com/example/core/1.0/core-1.0-natives-linux.jar", sha1: "b", size: 1, url: "https://example/b.jar" } },
+        },
+        {
+          name: "com.example:core:1.0:natives-windows",
+          rules: [{ action: "allow", os: { name: "windows" } }],
+          downloads: { artifact: { path: "com/example/core/1.0/core-1.0-natives-windows.jar", sha1: "c", size: 1, url: "https://example/c.jar" } },
+        },
+      ],
+    };
+    const all = collectMavenizerLibraryArtifacts(versionJson);
+    const osOnly = versionJson.libraries
+      .filter((lib) => mojangLibraryAppliesToCurrentOs(lib))
+      .map((lib) => lib.downloads?.artifact?.path)
+      .filter(Boolean);
+    assert.equal(all.length, 3);
+    assert.ok(osOnly.length < all.length);
   });
 });
 
@@ -442,8 +470,8 @@ describe("loader support computation", () => {
   it("derives loader MC lists from upstream metadata in release order", async () => {
     const { computeLoaderVersions, forgeMcVersionFromPromoKey } = await import("../src/meta/loader-support.js");
     const result = computeLoaderVersions(
-      ["26.1.2", "1.21.4", "1.20.1", "1.7.10"],
-      ["1.21.4", "26.1.2"],
+      ["26.1.2", "1.21.4", "1.14.3", "1.14.4", "1.20.1", "1.7.10"],
+      ["1.21.4", "1.14.3", "1.14.4", "26.1.2"],
       {
         "1.20.1-latest": "47.4.0",
         "1.7.10-recommended": "10.13.4.1614",
@@ -451,7 +479,7 @@ describe("loader support computation", () => {
       ["21.4.123", "26.1.2.1"],
     );
 
-    assert.deepEqual(result.fabric, ["26.1.2", "1.21.4"]);
+    assert.deepEqual(result.fabric, ["26.1.2", "1.21.4", "1.14.4"]);
     assert.deepEqual(result.forge, ["1.20.1", "1.7.10"]);
     assert.deepEqual(result.neoforge, ["26.1.2", "1.21.4"]);
     assert.equal(forgeMcVersionFromPromoKey("1.20.1-latest"), "1.20.1");
@@ -721,6 +749,21 @@ describe("Forge Mavenizer auxiliary JDK detection", () => {
       forgeMavenizerCacheDir(),
       path.join(getIsolatedGradleHome(), "caches", "minecraftforge", "forgegradle", "mavenizer", "caches"),
     );
+
+    const { getDmclHome } = await import("../src/core/dmcl-home.js");
+    const jdk21 = path.join(getDmclHome(), "jdks", "21");
+    const javaBin = path.join(jdk21, "bin", process.platform === "win32" ? "java.exe" : "java");
+    if (fs.existsSync(javaBin)) {
+      fs.writeFileSync(
+        path.join(dir, "gradle.properties"),
+        `org.gradle.java.home=${jdk21.replace(/\\/g, "/")}\n`,
+      );
+      assert.match(
+        forgeMavenizerCacheDir(dir),
+        /jvm-21[\\/]+caches[\\/]+minecraftforge[\\/]+forgegradle[\\/]+mavenizer[\\/]+caches$/,
+      );
+      assert.notEqual(forgeMavenizerCacheDir(), forgeMavenizerCacheDir(dir));
+    }
 
     fs.rmSync(dir, { recursive: true, force: true });
   });

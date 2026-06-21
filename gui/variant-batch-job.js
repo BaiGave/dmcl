@@ -402,6 +402,8 @@ async function processVariantBatchJob(jobId) {
                 const lines = [];
                 const log = (line) => {
                     lines.push(line);
+                    if (target.variantId)
+                        (0, build_queue_1.appendVariantLiveLog)(target.variantId, line);
                     if (/正在|构建|Forge|Mavenizer|修复|失败|成功|✔|错误/i.test(line)) {
                         target.message = line.length > 120 ? line.slice(0, 120) + "…" : line;
                         persistJob(job);
@@ -455,6 +457,8 @@ async function processVariantBatchJob(jobId) {
                 }
                 recomputeCounters(job);
                 persistJob(job);
+                if (target.variantId)
+                    (0, build_queue_1.clearVariantLiveLog)(target.variantId);
                 if (lines.length > 0 && target.projectPath) {
                     (0, build_queue_1.saveVariantBuildLog)(target.projectPath, lines);
                 }

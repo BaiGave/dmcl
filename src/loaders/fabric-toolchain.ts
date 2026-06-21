@@ -3,7 +3,7 @@ import path from "node:path";
 import { patchProperties, walkFiles } from "../core/fsutils.js";
 import { requiredJavaFor } from "../core/jdk.js";
 import { pascalCase } from "../core/scaffold.js";
-import { fetchFabricApiVersion } from "../meta/fabric.js";
+import { fetchFabricApiVersion, isFabricApiVersionPublished, fabricApiVersionTargetsMc } from "../meta/fabric.js";
 import { isLegacy1xMc, isUnobfuscatedMc, mcFeatureNumber, supportsSplitSources } from "../meta/mc-version.js";
 import { detectProject } from "../workspace/detect.js";
 import { wantsSplitSources } from "../core/side-layout.js";
@@ -342,7 +342,16 @@ export async function ensureFabricApiVersion(targetDir: string, log: Logger): Pr
   const props = readGradleProps(targetDir);
   const current = props.fabric_api_version ?? props.fabric_version ?? null;
   const resolved = await fetchFabricApiVersion(detected.mcVersion);
-  if (!resolved || current === resolved) return false;
+  if (!resolved) return false;
+
+  const currentValid = current
+    ? await isFabricApiVersionPublished(current) && fabricApiVersionTargetsMc(current, detected.mcVersion)
+    : false;
+  if (currentValid && current === resolved) return false;
+  if (currentValid && current !== resolved) {
+    // 当前版本可用且与解析结果不同时不强制覆盖（避免 Modrinth/Maven 排序差异误改）
+    return false;
+  }
 
   log(`Fabric API 版本修正：${current ?? "(未设置)"} → ${resolved}（MC ${detected.mcVersion}）`);
 

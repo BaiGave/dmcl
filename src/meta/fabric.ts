@@ -1,4 +1,4 @@
-import { fetchJson, fetchText } from "../core/http.js";
+import { fetchJson, fetchText, probeUrl } from "../core/http.js";
 import { getMetaCache } from "./meta-cache.js";
 import { META_ENDPOINTS } from "./sources.js";
 
@@ -99,29 +99,47 @@ function pickBestMavenFabricApiVersion(versions: string[], mcVersion: string): s
   return exact[exact.length - 1];
 }
 
+function fabricApiMavenPomUrl(version: string): string {
+  return `https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-api/${encodeURIComponent(version)}/fabric-api-${encodeURIComponent(version)}.pom`;
+}
+
+export async function isFabricApiVersionPublished(version: string): Promise<boolean> {
+  return (await probeUrl(fabricApiMavenPomUrl(version), { retries: 1, timeoutMs: 12_000 })) === "ok";
+}
+
 /** Fabric API 版本：优先 Modrinth（按 game_versions）；不可达时退回 Maven 元数据 */
 export async function fetchFabricApiVersion(mcVersion: string): Promise<string | null> {
+  let modrinthCandidate: string | null = null;
   try {
     const list = await fetchJson<ModrinthFabricVersion[]>(
       META_ENDPOINTS.fabricApiModrinth(mcVersion),
       { retries: 1, timeoutMs: 12_000 },
     );
     const tagged = list.find((entry) => entry.game_versions?.includes(mcVersion));
-    if (tagged) return tagged.version_number;
-    const matched = list.find((entry) => fabricApiVersionTargetsMc(entry.version_number, mcVersion));
-    if (matched) return matched.version_number;
+    if (tagged) modrinthCandidate = tagged.version_number;
+    else {
+      const matched = list.find((entry) => fabricApiVersionTargetsMc(entry.version_number, mcVersion));
+      if (matched) modrinthCandidate = matched.version_number;
+    }
   } catch {
     // 退回 Maven
   }
+
+  if (modrinthCandidate && await isFabricApiVersionPublished(modrinthCandidate)) {
+    return modrinthCandidate;
+  }
+
   try {
     const xml = await fetchText(
       META_ENDPOINTS.fabricApiMavenMetadata,
       { retries: 1, timeoutMs: 12_000 },
     );
     const versions = [...xml.matchAll(/<version>([^<]+)<\/version>/g)].map((match) => match[1]);
-    return pickBestMavenFabricApiVersion(versions, mcVersion);
+    const picked = pickBestMavenFabricApiVersion(versions, mcVersion);
+    if (picked && await isFabricApiVersionPublished(picked)) return picked;
   } catch {
     return null;
   }
+  return null;
 }
-
+

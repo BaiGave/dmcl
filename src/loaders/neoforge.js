@@ -1,0 +1,63 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.scaffoldNeoForge = scaffoldNeoForge;
+const node_path_1 = __importDefault(require("node:path"));
+const http_js_1 = require("../core/http.js");
+const template_js_1 = require("../core/template.js");
+const fsutils_js_1 = require("../core/fsutils.js");
+const mappings_js_1 = require("../core/mappings.js");
+const neoforge_js_1 = require("../meta/neoforge.js");
+async function scaffoldNeoForge(opts, log) {
+    const versions = await (0, neoforge_js_1.fetchNeoForgeVersions)();
+    const neoVersion = (0, neoforge_js_1.pickNeoForgeVersion)(versions, opts.mcVersion);
+    if (!neoVersion) {
+        throw new Error(`NeoForge 不支持 Minecraft ${opts.mcVersion}（NeoForge 从 1.20.1 开始提供）`);
+    }
+    let zipUrl = null;
+    // 1) 精确版本仓库
+    for (const url of (0, neoforge_js_1.neoMdkZipCandidates)(opts.mcVersion)) {
+        if (await (0, http_js_1.urlExists)(url)) {
+            zipUrl = url;
+            break;
+        }
+    }
+    // 2) 回退：用邻近较高 patch 版本的 MDK 模板（ModDevGradle 在同 minor 系内兼容）
+    if (!zipUrl) {
+        for (const url of (0, neoforge_js_1.neoMdkFallbackCandidates)(opts.mcVersion)) {
+            if (await (0, http_js_1.urlExists)(url)) {
+                log(`未找到精确版本仓库，使用邻近版本 MDK 模板作为回退`);
+                zipUrl = url;
+                break;
+            }
+        }
+    }
+    if (!zipUrl) {
+        throw new Error(`未找到 Minecraft ${opts.mcVersion} 的官方 NeoForge MDK 模板仓库`);
+    }
+    log(`下载 NeoForge MDK 模板（NeoForge ${neoVersion}）…`);
+    await (0, template_js_1.downloadAndExtract)(zipUrl, opts.targetDir);
+    // 必须先做全局占位符替换，再补丁 properties，否则新写入的值会被二次替换
+    log("替换模板占位符…");
+    await (0, template_js_1.adaptTemplate)(opts, {
+        modIdToken: "examplemod",
+        classToken: "ExampleMod",
+        displayToken: "Example Mod",
+    });
+    const gradleProps = node_path_1.default.join(opts.targetDir, "gradle.properties");
+    const patched = await (0, fsutils_js_1.patchProperties)(gradleProps, {
+        neo_version: neoVersion,
+        minecraft_version: opts.mcVersion,
+        mod_id: opts.modId,
+        mod_name: opts.displayName,
+        mod_group_id: opts.group,
+        mod_version: "0.1.0",
+        mod_authors: "YourName",
+        mod_description: `${opts.displayName} - 使用 DMCL 生成`,
+    });
+    if (patched.length > 0)
+        log(`已更新 gradle.properties（${patched.join(", ")}）`);
+    await (0, mappings_js_1.applyMappings)(opts, log);
+}

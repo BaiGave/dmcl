@@ -772,9 +772,15 @@ export async function verifyExistingProject(
   }
 
   if (loader === "forge") {
-    await withGradleBuildSlot(gradleSlots, () =>
-      prewarmForgeMavenizerMcpTools(projectPath, capture, jdkOpts),
-    ).catch(() => {});
+    await withGradleBuildSlot(gradleSlots, async () => {
+      await prewarmForgeMavenizerMcpTools(projectPath, capture, jdkOpts);
+      await prewarmForgeMavenizerLibraries(projectPath, capture, jdkOpts);
+    }).catch(() => {});
+  }
+
+  if (loader === "fabric") {
+    const { ensureFabricApiVersion } = await import("../loaders/fabric-toolchain.js");
+    await ensureFabricApiVersion(projectPath, capture).catch(() => {});
   }
 
   if (options.isCancelled?.()) {

@@ -11,6 +11,7 @@ import { detectProject } from "./detect.js";
 import { getWorkspace } from "./store.js";
 import { copySharedModAssets, stripForeignLoaderMetadata, repairCrossLoaderProject } from "./cross-loader.js";
 import { inferModDir } from "./project-meta.js";
+import { FABRIC_MIN_MC_VERSION, isFabricMcSupported } from "../meta/mc-version.js";
 
 async function ensureJdk(mcVersion: string, targetDir: string, log: Logger): Promise<void> {
   await ensureProjectToolchain(targetDir, mcVersion, log);
@@ -66,6 +67,9 @@ export async function generateVariant(
   log: Logger,
 ): Promise<ModVariant> {
   const { mod, sourceVariant, targetLoader, targetMc } = input;
+  if (targetLoader === "fabric" && !isFabricMcSupported(targetMc)) {
+    throw new Error(`Fabric 最低支持 Minecraft ${FABRIC_MIN_MC_VERSION}，无法生成 ${targetMc}`);
+  }
   const targetDir = defaultVariantPath(mod.modId, targetLoader, targetMc);
   const store = getWorkspace();
   store.refresh({ force: true });

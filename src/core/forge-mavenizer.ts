@@ -136,19 +136,19 @@ export function usesForgeGradle(targetDir: string): boolean {
   return /net\.minecraftforge\.gradle|minecraft\.dependency\(['"]net\.minecraftforge:forge/.test(content);
 }
 
-export function gradleUserHome(): string {
-  return getIsolatedGradleHome();
+export function gradleUserHome(targetDir?: string): string {
+  return getIsolatedGradleHome(targetDir);
 }
 
-export function forgeMavenizerCacheDir(): string {
-  return path.join(gradleUserHome(), "caches", "minecraftforge", "forgegradle", "mavenizer", "caches");
+export function forgeMavenizerCacheDir(targetDir?: string): string {
+  return path.join(gradleUserHome(targetDir), "caches", "minecraftforge", "forgegradle", "mavenizer", "caches");
 }
 
 function artifactCachePath(cacheDir: string, artifactPath: string): string {
   return path.join(cacheDir, "maven", "mojang", ...artifactPath.split("/"));
 }
 
-function sharedGradleArtifactPath(artifact: MojangLibraryArtifact): string | null {
+function sharedGradleArtifactPath(artifact: MojangLibraryArtifact, targetDir?: string): string | null {
   const parts = artifact.path.split("/");
   if (parts.length < 4) return null;
   const filename = parts.at(-1)!;
@@ -156,7 +156,7 @@ function sharedGradleArtifactPath(artifact: MojangLibraryArtifact): string | nul
   const module = parts.at(-3)!;
   const group = parts.slice(0, -3).join(".");
   const versionDir = path.join(
-    gradleUserHome(),
+    gradleUserHome(targetDir),
     "caches",
     "modules-2",
     "files-2.1",
@@ -232,10 +232,14 @@ function minecraftAssetsDir(): string {
   return path.join(os.homedir(), ".minecraft", "assets");
 }
 
-function sharedAssetDirs(): string[] {
+function sharedAssetDirs(targetDir?: string): string[] {
+  const home = gradleUserHome(targetDir);
   return [
-    path.join(gradleUserHome(), "caches", "neoformruntime", "assets"),
-    path.join(gradleUserHome(), "caches", "fabric-loom", "assets"),
+    path.join(home, "caches", "neoformruntime", "assets"),
+    path.join(home, "caches", "fabric-loom", "assets"),
+    // 兼容预热写入默认 Gradle 目录、构建使用 jvm-N 分片的历史缓存
+    path.join(getIsolatedGradleHome(), "caches", "neoformruntime", "assets"),
+    path.join(getIsolatedGradleHome(), "caches", "fabric-loom", "assets"),
   ];
 }
 
@@ -286,6 +290,91 @@ export function mojangLibraryAppliesToCurrentOs(
   return allowed;
 }
 
+/** Forge Mavenizer listLibraries 需要全平台库（含各 OS natives），不能只预热当前 OS。 */
+export function collectMavenizerLibraryArtifacts(
+  versionJson: MojangVersionJson,
+): MojangLibraryArtifact[] {
+  const seen = new Set<string>();
+  const artifacts: MojangLibraryArtifact[] = [];
+  for (const lib of versionJson.libraries ?? []) {
+    const artifact = lib.downloads?.artifact;
+    if (!artifact?.path || !artifact.sha1 || !artifact.url) continue;
+    if (seen.has(artifact.path)) continue;
+    seen.add(artifact.path);
+    artifacts.push(artifact);
+  }
+  return artifacts;
+}
+
+function findLatestMcpConfigId(cacheDir: string, mcVersion: string): string | null {
+  const roots = [
+    path.join(cacheDir, "mcp", "de", "oceanlabs", "mcp", "mcp_config"),
+    path.join(cacheDir, "maven", "forge", "de", "oceanlabs", "mcp", "mcp_config"),
+  ];
+  let best: { id: string; mtime: number } | null = null;
+  for (const root of roots) {
+    try {
+      for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !entry.name.startsWith(`${mcVersion}-`)) continue;
+        const mtime = fs.statSync(path.join(root, entry.name)).mtimeMs;
+        if (!best || mtime > best.mtime) best = { id: entry.name, mtime };
+      }
+    } catch {
+      // MCP config not materialized yet.
+    }
+  }
+  return best?.id ?? null;
+}
+
+function seedForgeMavenizerListLibraries(
+  cacheDir: string,
+  mcVersion: string,
+  versionJson: MojangVersionJson,
+): boolean {
+  const mcpConfigId = findLatestMcpConfigId(cacheDir, mcVersion);
+  if (!mcpConfigId) return false;
+
+  const joinedDir = path.join(
+    cacheDir,
+    "mcp",
+    "de",
+    "oceanlabs",
+    "mcp",
+    "mcp_config",
+    mcpConfigId,
+    "joined",
+  );
+  const versionFile = path.join(cacheDir, "minecraft_tasks", mcVersion, "version.json");
+  const versionSha1 = sha1File(versionFile);
+  if (!versionSha1) return false;
+
+  const lines: string[] = [];
+  const cacheLines: string[] = [];
+  for (const lib of versionJson.libraries ?? []) {
+    const artifact = lib.downloads?.artifact;
+    if (!artifact?.path || !artifact.sha1) continue;
+    const dest = artifactCachePath(cacheDir, artifact.path);
+    if (sha1File(dest) !== artifact.sha1) return false;
+    lines.push(`-e=${dest}`);
+    if (lib.name) cacheLines.push(`${lib.name}=${artifact.sha1}`);
+  }
+  if (lines.length === 0) return false;
+  cacheLines.push(`version.json=${versionSha1}`);
+
+  fs.mkdirSync(joinedDir, { recursive: true });
+  const listFile = path.join(joinedDir, "listLibraries.txt");
+  fs.writeFileSync(listFile, `${lines.join("\n")}\n`, "utf8");
+  fs.writeFileSync(`${listFile}.cache`, `${cacheLines.join("\n")}\n`, "utf8");
+  return true;
+}
+
+async function persistLauncherManifest(cacheDir: string, sourcePath: string): Promise<void> {
+  const target = path.join(cacheDir, "launcher_manifest.json");
+  if (path.resolve(sourcePath) === path.resolve(target)) return;
+  await fs.promises.mkdir(cacheDir, { recursive: true });
+  await fs.promises.copyFile(sourcePath, target);
+}
+
 function versionManifestUrls(): string[] {
   return [
     "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
@@ -295,17 +384,23 @@ function versionManifestUrls(): string[] {
 
 async function fetchVersionManifest(
   cacheDir: string,
+  targetDir: string | undefined,
   options?: JdkOptions,
 ): Promise<MojangVersionManifest> {
   const cachedCandidates = [
     path.join(cacheDir, "launcher_manifest.json"),
-    path.join(gradleUserHome(), "caches", "fabric-loom", "mojang_versions_manifest.json"),
-    path.join(gradleUserHome(), "caches", "neoformruntime", "artifacts", "minecraft_launcher_manifest.json"),
+    path.join(gradleUserHome(targetDir), "caches", "fabric-loom", "mojang_versions_manifest.json"),
+    path.join(gradleUserHome(targetDir), "caches", "neoformruntime", "artifacts", "minecraft_launcher_manifest.json"),
+    path.join(getIsolatedGradleHome(), "caches", "fabric-loom", "mojang_versions_manifest.json"),
+    path.join(getIsolatedGradleHome(), "caches", "neoformruntime", "artifacts", "minecraft_launcher_manifest.json"),
   ];
   for (const candidate of cachedCandidates) {
     try {
       const manifest = JSON.parse(await fs.promises.readFile(candidate, "utf8")) as MojangVersionManifest;
-      if (manifest.versions?.length) return manifest;
+      if (manifest.versions?.length) {
+        await persistLauncherManifest(cacheDir, candidate);
+        return manifest;
+      }
     } catch {
       // Try the next cache or an upstream endpoint.
     }
@@ -317,6 +412,7 @@ async function fetchVersionManifest(
     for (const url of versionManifestUrls()) {
       try {
         await downloadUrlToFile(url, tmp, options);
+        await persistLauncherManifest(cacheDir, tmp);
         return JSON.parse(await fs.promises.readFile(tmp, "utf8")) as MojangVersionManifest;
       } catch (err) {
         if (options?.isCancelled?.()) throw err;
@@ -340,7 +436,7 @@ export async function ensureForgeMavenizerVersionJson(
   const mcVersion = readMcVersionFromProject(targetDir);
   if (!mcVersion) return false;
 
-  const cacheDir = forgeMavenizerCacheDir();
+  const cacheDir = forgeMavenizerCacheDir(targetDir);
   const versionDir = path.join(cacheDir, "minecraft_tasks", mcVersion);
   const versionFile = path.join(versionDir, "version.json");
   const markerFile = `${versionFile}.cache`;
@@ -355,7 +451,7 @@ export async function ensureForgeMavenizerVersionJson(
     return false;
   }
 
-  const manifest = await fetchVersionManifest(cacheDir, options);
+  const manifest = await fetchVersionManifest(cacheDir, targetDir, options);
   const version = manifest.versions?.find((item) => item.id === mcVersion);
   if (!version?.url || !version.sha1) {
     throw new Error(`Minecraft ${mcVersion} is missing from the official version manifest`);
@@ -363,7 +459,8 @@ export async function ensureForgeMavenizerVersionJson(
 
   if (sha1File(versionFile) !== version.sha1) {
     const sharedCandidates = [
-      path.join(gradleUserHome(), "caches", "fabric-loom", mcVersion, "mojang_minecraft_info.json"),
+      path.join(gradleUserHome(targetDir), "caches", "fabric-loom", mcVersion, "mojang_minecraft_info.json"),
+      path.join(getIsolatedGradleHome(), "caches", "fabric-loom", mcVersion, "mojang_minecraft_info.json"),
     ];
     const reusable = sharedCandidates.find((candidate) => sha1File(candidate) === version.sha1);
     if (reusable) {
@@ -401,6 +498,7 @@ async function prewarmForgeMavenizerVersionFiles(
   versionJson: MojangVersionJson,
   log: JdkLogger,
   options?: JdkOptions,
+  targetDir?: string,
 ): Promise<void> {
   const versionJsonFile = path.join(cacheDir, "minecraft_tasks", mcVersion, "version.json");
   const versionJsonSha1 = sha1File(versionJsonFile);
@@ -421,9 +519,12 @@ async function prewarmForgeMavenizerVersionFiles(
         ? "minecraft-client.jar"
         : key === "server" ? "minecraft-server.jar" : null;
       const shared = loomName
-        ? path.join(gradleUserHome(), "caches", "fabric-loom", mcVersion, loomName)
+        ? [
+          path.join(gradleUserHome(targetDir), "caches", "fabric-loom", mcVersion, loomName),
+          path.join(getIsolatedGradleHome(), "caches", "fabric-loom", mcVersion, loomName),
+        ].find((candidate) => sha1File(candidate) === download.sha1) ?? null
         : null;
-      if (shared && sha1File(shared) === download.sha1) {
+      if (shared) {
         log(`Reusing SHA1-verified Minecraft ${mcVersion} ${key} from shared Gradle cache`);
         await linkOrCopyFile(shared, target);
       } else {
@@ -533,8 +634,9 @@ async function downloadVerifiedArtifact(
   artifact: MojangLibraryArtifact,
   dest: string,
   options?: JdkOptions,
+  targetDir?: string,
 ): Promise<void> {
-  const shared = sharedGradleArtifactPath(artifact);
+  const shared = sharedGradleArtifactPath(artifact, targetDir);
   if (shared && sha1File(shared) === artifact.sha1) {
     await fs.promises.mkdir(path.dirname(dest), { recursive: true });
     await fs.promises.copyFile(shared, dest);
@@ -608,7 +710,7 @@ export async function prewarmForgeMavenizerMcpTools(
   const mcVersion = readMcVersionFromProject(targetDir);
   if (!mcVersion) return 0;
 
-  const cacheDir = forgeMavenizerCacheDir();
+  const cacheDir = forgeMavenizerCacheDir(targetDir);
   const configRoot = path.join(cacheDir, "maven", "forge", "de", "oceanlabs", "mcp", "mcp_config");
   let configs: string[] = [];
   try {
@@ -684,18 +786,13 @@ export async function prewarmForgeMavenizerLibraries(
   const mcVersion = readMcVersionFromProject(targetDir);
   if (!mcVersion) return { total: 0, cached: 0, downloaded: 0, missing: 0 };
 
-  const cacheDir = forgeMavenizerCacheDir();
+  const cacheDir = forgeMavenizerCacheDir(targetDir);
   await ensureForgeMavenizerVersionJson(targetDir, log, options);
   const versionJson = readMojangVersionJson(cacheDir, mcVersion);
   if (!versionJson?.libraries) return { total: 0, cached: 0, downloaded: 0, missing: 0 };
-  await prewarmForgeMavenizerVersionFiles(cacheDir, mcVersion, versionJson, log, options);
+  await prewarmForgeMavenizerVersionFiles(cacheDir, mcVersion, versionJson, log, options, targetDir);
 
-  const artifacts = versionJson.libraries
-    .filter(mojangLibraryAppliesToCurrentOs)
-    .map((lib) => lib.downloads?.artifact)
-    .filter((artifact): artifact is MojangLibraryArtifact => Boolean(
-      artifact?.path && artifact.sha1 && artifact.url,
-    ));
+  const artifacts = collectMavenizerLibraryArtifacts(versionJson);
   let cached = 0;
   const missing = artifacts.filter((artifact) => {
     const dest = artifactCachePath(cacheDir, artifact.path);
@@ -707,24 +804,28 @@ export async function prewarmForgeMavenizerLibraries(
     return true;
   });
 
-  if (missing.length === 0) return { total: artifacts.length, cached, downloaded: 0, missing: 0 };
+  if (missing.length > 0) {
+    log(`Prewarming ${missing.length} Forge Mavenizer Minecraft libraries (all platforms)`);
+    let downloaded = 0;
+    await runPool(missing, 6, async (artifact) => {
+      throwIfCancelled(options);
+      await downloadVerifiedArtifact(artifact, artifactCachePath(cacheDir, artifact.path), options, targetDir);
+      downloaded++;
+      if (downloaded === missing.length || downloaded % 10 === 0) {
+        log(`Forge Mavenizer library cache ${downloaded}/${missing.length}`);
+      }
+    });
+  }
 
-  log(`Prewarming ${missing.length} Forge Mavenizer Minecraft libraries`);
-  let downloaded = 0;
-  await runPool(missing, 4, async (artifact) => {
-    throwIfCancelled(options);
-    await downloadVerifiedArtifact(artifact, artifactCachePath(cacheDir, artifact.path), options);
-    downloaded++;
-    if (downloaded === missing.length || downloaded % 10 === 0) {
-      log(`Forge Mavenizer library cache ${downloaded}/${missing.length}`);
-    }
-  });
+  if (seedForgeMavenizerListLibraries(cacheDir, mcVersion, versionJson)) {
+    log(`Forge Mavenizer listLibraries cache seeded for Minecraft ${mcVersion}`);
+  }
 
   return {
     total: artifacts.length,
     cached,
-    downloaded,
-    missing: missing.length - downloaded,
+    downloaded: missing.length,
+    missing: 0,
   };
   });
 }
@@ -739,7 +840,7 @@ export async function prewarmForgeSlimeLauncherAssets(
   const mcVersion = readMcVersionFromProject(targetDir);
   if (!mcVersion) return { total: 0, cached: 0, downloaded: 0, missing: 0 };
 
-  const versionJson = readMojangVersionJson(forgeMavenizerCacheDir(), mcVersion);
+  const versionJson = readMojangVersionJson(forgeMavenizerCacheDir(targetDir), mcVersion);
   const assetIndex = versionJson?.assetIndex;
   if (!assetIndex?.id || !assetIndex.sha1 || !assetIndex.url) {
     return { total: 0, cached: 0, downloaded: 0, missing: 0 };
@@ -749,11 +850,11 @@ export async function prewarmForgeSlimeLauncherAssets(
   const indexFile = path.join(assetsDir, "indexes", `${assetIndex.id}.json`);
   if (sha1File(indexFile) !== assetIndex.sha1) {
     const archivedIndex = path.join(
-      forgeMavenizerCacheDir(),
+      forgeMavenizerCacheDir(targetDir),
       "asset_indexes",
       `${assetIndex.sha1}.json`,
     );
-    const sharedIndex = [archivedIndex, ...sharedAssetDirs()
+    const sharedIndex = [archivedIndex, ...sharedAssetDirs(targetDir)
       .map((dir) => path.join(dir, "indexes", `${assetIndex.id}.json`))]
       .find((candidate) => sha1File(candidate) === assetIndex.sha1);
     if (sharedIndex) {
@@ -805,7 +906,7 @@ export async function prewarmForgeSlimeLauncherAssets(
   await runPool(missing, 8, async (asset) => {
     throwIfCancelled(options);
     const dest = path.join(assetsDir, "objects", asset.hash.slice(0, 2), asset.hash);
-    const shared = sharedAssetDirs()
+    const shared = sharedAssetDirs(targetDir)
       .map((dir) => path.join(dir, "objects", asset.hash.slice(0, 2), asset.hash))
       .find((candidate) => {
         try {
@@ -864,12 +965,13 @@ export async function ensureForgeMavenizerJdkCache(
   if (!usesForgeGradle(targetDir)) return;
 
   const ensureReady = async (): Promise<void> => {
-    const cacheDir = forgeMavenizerCacheDir();
+    const cacheDir = forgeMavenizerCacheDir(targetDir);
     const target = path.join(cacheDir, DMCL_MAVENIZER_JDK_DIR);
 
     if (detectJavaMajorAt(target) === AUX_JDK_MAJOR && fs.existsSync(javaExe(target))) {
       log(`Forge Mavenizer auxiliary JDK ${AUX_JDK_MAJOR} is ready: ${target}`);
       await prewarmForgeMavenizerLibraries(targetDir, log, options);
+      await prewarmForgeMavenizerMcpTools(targetDir, log, options).catch(() => {});
       return;
     }
 
@@ -888,6 +990,7 @@ export async function ensureForgeMavenizerJdkCache(
 
     log(`Forge Mavenizer auxiliary JDK ${AUX_JDK_MAJOR} ${mode}: ${target}`);
     await prewarmForgeMavenizerLibraries(targetDir, log, options);
+    await prewarmForgeMavenizerMcpTools(targetDir, log, options).catch(() => {});
   };
 
   if (forgeMavenizerJdkSetupInflight) {

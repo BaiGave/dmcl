@@ -66,23 +66,36 @@ export function showModal(title: string, content: string): void {
 
 let lastLogModalText = "";
 
+const MAX_LOG_MODAL_CHARS = 500_000;
+
+function truncateLogContent(content: string): string {
+  if (content.length <= MAX_LOG_MODAL_CHARS) return content;
+  const omitted = content.length - MAX_LOG_MODAL_CHARS;
+  return `…（日志过长，已省略前 ${omitted} 字符）\n\n${content.slice(-MAX_LOG_MODAL_CHARS)}`;
+}
+
+/** 更新日志弹窗正文，并保持「复制全部」与 DOM 同步 */
+export function setModalLogContent(content: string, options?: { scrollToEnd?: boolean }): void {
+  const log = $("modal-log");
+  const copyBtn = $("modal-copy-log") as HTMLButtonElement | null;
+  const normalized = truncateLogContent(content);
+  lastLogModalText = normalized;
+  if (log) {
+    log.textContent = normalized;
+    log.scrollTop = options?.scrollToEnd ? log.scrollHeight : 0;
+  }
+  if (copyBtn) copyBtn.hidden = !normalized.trim();
+}
+
 export function showLogModal(title: string, content: string, options?: { copyLabel?: string }): void {
   const titleEl = $("modal-title");
-  const log = $("modal-log");
   const overlay = $("modal-overlay");
   const copyBtn = $("modal-copy-log") as HTMLButtonElement | null;
   const sourceCancel = $("modal-source-cancel") as HTMLButtonElement | null;
   if (sourceCancel) sourceCancel.hidden = true;
-  lastLogModalText = content;
   if (titleEl) titleEl.textContent = title;
-  if (log) {
-    log.textContent = content;
-    log.scrollTop = 0;
-  }
-  if (copyBtn) {
-    copyBtn.hidden = !content.trim();
-    copyBtn.textContent = options?.copyLabel ?? "复制全部";
-  }
+  setModalLogContent(content);
+  if (copyBtn && options?.copyLabel) copyBtn.textContent = options.copyLabel;
   logModalReturnFocus = document.activeElement as HTMLElement | null;
   overlay?.classList.add("visible");
   const modal = overlay?.querySelector<HTMLElement>(".modal");
@@ -90,7 +103,8 @@ export function showLogModal(title: string, content: string, options?: { copyLab
 }
 
 export function getLastLogModalText(): string {
-  return lastLogModalText;
+  const live = $("modal-log")?.textContent;
+  return (live && live.length > 0) ? live : lastLogModalText;
 }
 
 let logModalReturnFocus: HTMLElement | null = null;

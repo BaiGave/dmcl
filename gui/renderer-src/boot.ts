@@ -1,6 +1,6 @@
 import { state, pathRefreshTimer, setPathRefreshTimer } from "./state";
 import { LOADERS, LOADER_LABELS, STATUS_LABELS, SIDE_LAYOUT_HINTS, SIDE_LAYOUT_HOVER_TIPS, SIDE_LAYOUT_OPTIONS } from "./constants";
-import { $, showError, hideError, setText, notify, showView, esc, showModal, showLogModal, getLastLogModalText, closeModal, confirmAction } from "./dom";
+import { $, showError, hideError, setText, notify, showView, esc, showModal, showLogModal, setModalLogContent, getLastLogModalText, closeModal, confirmAction } from "./dom";
 import { hydrateIcons, icon, loaderIcon } from "./icons";
 import { api, fetchWithRetry } from "./api";
 
@@ -831,8 +831,7 @@ export function bootWorkbench(): void {
           var progress = "Minecraft " + task.completed + "/" + task.total
             + (task.currentPhase ? " · " + sourcePhaseLabel(task.currentPhase) : "")
             + dependencyProgress;
-          log.textContent = progress + "\n" + (task.logs || []).join("\n");
-          log.scrollTop = log.scrollHeight;
+          setModalLogContent(progress + "\n" + (task.logs || []).join("\n"), { scrollToEnd: true });
         }
         if (task.state !== "running") {
           if (task.state === "completed") {
@@ -910,6 +909,8 @@ export function bootWorkbench(): void {
       if (logPayload.source === "live") title += "（实时）";
       else if (logPayload.fileName) title += " · " + logPayload.fileName;
       showLogModal(title, body);
+      if (logPayload.source === "live") startLiveLogPolling(variant.id);
+      else stopLiveLogPolling();
     } else if (action === "relocate") {
       var pick = await api("/api/select-dir");
       if (!pick.path) return;
@@ -957,6 +958,39 @@ export function bootWorkbench(): void {
   // ============ 构建队列 ============
 
   var queueSummaryUntil = 0;
+  var liveLogPollTimer: ReturnType<typeof setInterval> | null = null;
+  var liveLogPollVariantId: string | null = null;
+
+  function stopLiveLogPolling() {
+    if (liveLogPollTimer) {
+      clearInterval(liveLogPollTimer);
+      liveLogPollTimer = null;
+    }
+    liveLogPollVariantId = null;
+  }
+
+  function startLiveLogPolling(variantId: string) {
+    stopLiveLogPolling();
+    liveLogPollVariantId = variantId;
+    liveLogPollTimer = setInterval(function () {
+      void (async function () {
+        if (!liveLogPollVariantId) return;
+        try {
+          var next = await api("/api/variants/" + encodeURIComponent(liveLogPollVariantId) + "/log") as {
+            content?: string;
+            source?: string;
+          };
+          if (next.source === "live" && next.content) {
+            setModalLogContent(next.content, { scrollToEnd: true });
+          } else {
+            stopLiveLogPolling();
+          }
+        } catch {
+          /* 轮询失败时继续 */
+        }
+      })();
+    }, 2000);
+  }
 
   function burstBuildParticles(target) {
     if (!target || reduceMotion) return;
@@ -2639,6 +2673,7 @@ export function bootWorkbench(): void {
   // ============ Modal ============
 
   $("modal-close").addEventListener("click", function () {
+    stopLiveLogPolling();
     closeModal();
   });
   $("modal-copy-log")?.addEventListener("click", async function () {
@@ -2673,7 +2708,10 @@ export function bootWorkbench(): void {
     }
   });
   $("modal-overlay")?.addEventListener("click", function (event) {
-    if (event.target === $("modal-overlay")) closeModal();
+    if (event.target === $("modal-overlay")) {
+      stopLiveLogPolling();
+      closeModal();
+    }
   });
   $("error-close")?.addEventListener("click", hideError);
   document.querySelectorAll(".action-menu button").forEach(function (button) {

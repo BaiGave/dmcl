@@ -14,6 +14,13 @@ export function isUnobfuscatedMc(mcVersion: string): boolean {
   return mcFeatureNumber(mcVersion) >= 26;
 }
 
+/** Fabric 加载器支持的最低 Minecraft 版本（1.14.4 起有完整 Loom / API 生态） */
+export const FABRIC_MIN_MC_VERSION = "1.14.4";
+
+export function isFabricMcSupported(mcVersion: string): boolean {
+  return compareMcVersions(mcVersion, FABRIC_MIN_MC_VERSION) >= 0;
+}
+
 export function compareMcVersions(a: string, b: string): number {
   const parse = (value: string) => value.split(".").map((part) => Number.parseInt(part, 10) || 0);
   const aa = parse(a);

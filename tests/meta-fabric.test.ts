@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { fabricApiVersionTargetsMc, fetchFabricApiVersion } from "../src/meta/fabric.js";
+import { fabricApiVersionTargetsMc, fetchFabricApiVersion, isFabricApiVersionPublished } from "../src/meta/fabric.js";
 import { summarizeFabricIncompatibleModsError } from "../src/core/gradle.js";
 
 describe("fabricApiVersionTargetsMc", () => {
@@ -42,6 +42,14 @@ describe("fetchFabricApiVersion integration", () => {
     const version = await fetchFabricApiVersion("1.16");
     assert.ok(version);
     assert.notEqual(version, "0.42.0+1.16");
+  });
+
+  it("resolves 1.14.4 with a Maven-published line, not stale Modrinth-only builds", async () => {
+    const version = await fetchFabricApiVersion("1.14.4");
+    assert.ok(version);
+    assert.notEqual(version, "0.2.7+build.127");
+    assert.match(version!, /1\.14/);
+    assert.equal(await isFabricApiVersionPublished(version!), true);
   });
 });
 

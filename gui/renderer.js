@@ -219,30 +219,41 @@
   function showModal(title, content) {
     showLogModal(title, content);
   }
+  function truncateLogContent(content) {
+    if (content.length <= MAX_LOG_MODAL_CHARS) return content;
+    const omitted = content.length - MAX_LOG_MODAL_CHARS;
+    return `\u2026\uFF08\u65E5\u5FD7\u8FC7\u957F\uFF0C\u5DF2\u7701\u7565\u524D ${omitted} \u5B57\u7B26\uFF09
+
+${content.slice(-MAX_LOG_MODAL_CHARS)}`;
+  }
+  function setModalLogContent(content, options) {
+    const log = $("modal-log");
+    const copyBtn = $("modal-copy-log");
+    const normalized = truncateLogContent(content);
+    lastLogModalText = normalized;
+    if (log) {
+      log.textContent = normalized;
+      log.scrollTop = options?.scrollToEnd ? log.scrollHeight : 0;
+    }
+    if (copyBtn) copyBtn.hidden = !normalized.trim();
+  }
   function showLogModal(title, content, options) {
     const titleEl = $("modal-title");
-    const log = $("modal-log");
     const overlay = $("modal-overlay");
     const copyBtn = $("modal-copy-log");
     const sourceCancel = $("modal-source-cancel");
     if (sourceCancel) sourceCancel.hidden = true;
-    lastLogModalText = content;
     if (titleEl) titleEl.textContent = title;
-    if (log) {
-      log.textContent = content;
-      log.scrollTop = 0;
-    }
-    if (copyBtn) {
-      copyBtn.hidden = !content.trim();
-      copyBtn.textContent = options?.copyLabel ?? "\u590D\u5236\u5168\u90E8";
-    }
+    setModalLogContent(content);
+    if (copyBtn && options?.copyLabel) copyBtn.textContent = options.copyLabel;
     logModalReturnFocus = document.activeElement;
     overlay?.classList.add("visible");
     const modal = overlay?.querySelector(".modal");
     requestAnimationFrame(() => (copyBtn && !copyBtn.hidden ? copyBtn : modal)?.focus());
   }
   function getLastLogModalText() {
-    return lastLogModalText;
+    const live = $("modal-log")?.textContent;
+    return live && live.length > 0 ? live : lastLogModalText;
   }
   function closeModal() {
     $("modal-overlay")?.classList.remove("visible");
@@ -293,12 +304,13 @@
       requestAnimationFrame(() => cancel.focus());
     });
   }
-  var lastLogModalText, logModalReturnFocus, confirmReturnFocus;
+  var lastLogModalText, MAX_LOG_MODAL_CHARS, logModalReturnFocus, confirmReturnFocus;
   var init_dom = __esm({
     "gui/renderer-src/dom.ts"() {
       "use strict";
       init_icons();
       lastLogModalText = "";
+      MAX_LOG_MODAL_CHARS = 5e5;
       logModalReturnFocus = null;
       confirmReturnFocus = null;
     }
@@ -1054,8 +1066,7 @@
           if (log) {
             var dependencyProgress = task.currentPhase === "dependencies" ? task.dependenciesFound ? " \xB7 \u524D\u7F6E\u6A21\u7EC4 " + (task.dependenciesPrepared || 0) + "/" + task.dependenciesFound : " \xB7 Gradle \u6B63\u5728\u89E3\u6790\u524D\u7F6E\u4F9D\u8D56" : "";
             var progress = "Minecraft " + task.completed + "/" + task.total + (task.currentPhase ? " \xB7 " + sourcePhaseLabel(task.currentPhase) : "") + dependencyProgress;
-            log.textContent = progress + "\n" + (task.logs || []).join("\n");
-            log.scrollTop = log.scrollHeight;
+            setModalLogContent(progress + "\n" + (task.logs || []).join("\n"), { scrollToEnd: true });
           }
           if (task.state !== "running") {
             if (task.state === "completed") {
@@ -1128,6 +1139,8 @@
         if (logPayload.source === "live") title += "\uFF08\u5B9E\u65F6\uFF09";
         else if (logPayload.fileName) title += " \xB7 " + logPayload.fileName;
         showLogModal(title, body);
+        if (logPayload.source === "live") startLiveLogPolling(variant.id);
+        else stopLiveLogPolling();
       } else if (action === "relocate") {
         var pick = await api("/api/select-dir");
         if (!pick.path) return;
@@ -1172,6 +1185,33 @@
       }
     }
     var queueSummaryUntil = 0;
+    var liveLogPollTimer = null;
+    var liveLogPollVariantId = null;
+    function stopLiveLogPolling() {
+      if (liveLogPollTimer) {
+        clearInterval(liveLogPollTimer);
+        liveLogPollTimer = null;
+      }
+      liveLogPollVariantId = null;
+    }
+    function startLiveLogPolling(variantId) {
+      stopLiveLogPolling();
+      liveLogPollVariantId = variantId;
+      liveLogPollTimer = setInterval(function() {
+        void (async function() {
+          if (!liveLogPollVariantId) return;
+          try {
+            var next = await api("/api/variants/" + encodeURIComponent(liveLogPollVariantId) + "/log");
+            if (next.source === "live" && next.content) {
+              setModalLogContent(next.content, { scrollToEnd: true });
+            } else {
+              stopLiveLogPolling();
+            }
+          } catch {
+          }
+        })();
+      }, 2e3);
+    }
     function burstBuildParticles(target) {
       if (!target || reduceMotion) return;
       var burst = document.createElement("span");
@@ -2784,6 +2824,7 @@
       await loadRegistry();
     }
     $("modal-close").addEventListener("click", function() {
+      stopLiveLogPolling();
       closeModal();
     });
     $("modal-copy-log")?.addEventListener("click", async function() {
@@ -2818,7 +2859,10 @@
       }
     });
     $("modal-overlay")?.addEventListener("click", function(event) {
-      if (event.target === $("modal-overlay")) closeModal();
+      if (event.target === $("modal-overlay")) {
+        stopLiveLogPolling();
+        closeModal();
+      }
     });
     $("error-close")?.addEventListener("click", hideError);
     document.querySelectorAll(".action-menu button").forEach(function(button) {

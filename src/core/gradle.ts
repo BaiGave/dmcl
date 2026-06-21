@@ -250,6 +250,21 @@ export async function runGradleBuildTask(
   onLine: LineHandler,
   opts?: GradleRunOptions,
 ): Promise<number> {
+  if (!hasGradlew(targetDir)) return 1;
+  await ensureGradlewExecutable(targetDir);
+  if (cancelledCode(opts) !== null) return 1;
+
+  try {
+    const { detectProject } = await import("../workspace/detect.js");
+    const detected = detectProject(targetDir);
+    if (detected?.loader === "fabric") {
+      const { ensureFabricApiVersion } = await import("../loaders/fabric-toolchain.js");
+      await ensureFabricApiVersion(targetDir, onLine);
+    }
+  } catch {
+    // 修正失败不阻断构建，由 Gradle 报错后再走自动修复
+  }
+
   return runGradleTask(targetDir, opts?.tasks ?? ["build", "--no-daemon"], onLine, opts);
 }
 

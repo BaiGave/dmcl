@@ -333,6 +333,15 @@ function clearLiveLog(variantId: string): void {
   liveLogsByVariant.delete(variantId);
 }
 
+/** 批任务 / 外部流程写入实时日志缓冲 */
+export function appendVariantLiveLog(variantId: string, line: string): void {
+  appendLiveLog(variantId, line);
+}
+
+export function clearVariantLiveLog(variantId: string): void {
+  clearLiveLog(variantId);
+}
+
 function tailFile(filePath: string, maxLines = 300): string | null {
   if (!fs.existsSync(filePath)) return null;
   try {
@@ -344,17 +353,47 @@ function tailFile(filePath: string, maxLines = 300): string | null {
   }
 }
 
+function extractProblemsReportText(filePath: string): string | null {
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    const html = fs.readFileSync(filePath, "utf8");
+    const stripped = html
+      .replace(/<script[\s\S]*?<\/script>/gi, "")
+      .replace(/<style[\s\S]*?<\/style>/gi, "")
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/(p|div|li|tr|h\d)>/gi, "\n")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/g, " ")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&amp;/g, "&")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    if (!stripped) return null;
+    const lines = stripped.split("\n").map((l) => l.trim()).filter(Boolean);
+    const tail = lines.slice(-120).join("\n");
+    return tail.length > 8000 ? tail.slice(-8000) : tail;
+  } catch {
+    return null;
+  }
+}
+
 function findGradleFallbackLogs(projectPath: string): Array<{ label: string; content: string }> {
   const resolved = path.resolve(projectPath);
-  const candidates: Array<{ label: string; file: string }> = [
-    { label: "Gradle problems-report", file: path.join(resolved, "build", "reports", "problems", "problems-report.html") },
+  const out: Array<{ label: string; content: string }> = [];
+  const textLogs: Array<{ label: string; file: string }> = [
     { label: "run/logs/latest.log", file: path.join(resolved, "run", "logs", "latest.log") },
     { label: "runs/client/logs/latest.log", file: path.join(resolved, "runs", "client", "logs", "latest.log") },
   ];
-  const out: Array<{ label: string; content: string }> = [];
-  for (const c of candidates) {
+  for (const c of textLogs) {
     const content = tailFile(c.file);
     if (content?.trim()) out.push({ label: c.label, content });
+  }
+  const problemsFile = path.join(resolved, "build", "reports", "problems", "problems-report.html");
+  const problemsText = extractProblemsReportText(problemsFile);
+  if (problemsText) {
+    out.push({ label: "Gradle problems-report（摘要）", content: problemsText });
   }
   return out;
 }
@@ -370,16 +409,25 @@ export async function getVariantBuildLogContent(variantId: string): Promise<{
     return {
       content: live.join("\n"),
       source: "live",
-      hint: "构建队列正在运行，显示实时输出",
+      hint: "任务进行中，显示实时输出",
     };
   }
 
   const files = await listLogs(variantId);
-  if (files.length > 0) {
-    const content = await readLog(files[0].path, variantId);
+  let readFailure: string | undefined;
+  for (const file of files) {
+    const content = await readLog(file.path, variantId);
     if (content) {
-      return { content, source: "saved", fileName: files[0].name };
+      return { content, source: "saved", fileName: file.name };
     }
+    readFailure = file.path;
+  }
+  if (files.length > 0) {
+    return {
+      content: "",
+      source: "none",
+      hint: `找到 ${files.length} 个日志文件但无法读取${readFailure ? "：" + readFailure : ""}。请检查文件权限或路径是否有效。`,
+    };
   }
 
   const projectPath = await resolveProjectPath(variantId);

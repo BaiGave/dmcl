@@ -66,9 +66,11 @@ export function planVerificationFixes(
     notes.push("Forge 项目中混入了 Fabric 源码或元数据");
   }
 
-  if (loader === "fabric" && /Incompatible mods|Fabric API|fabric-api|有不兼容的模组/i.test(logText)) {
+  if (loader === "fabric" && /Incompatible mods|Fabric API|fabric-api|有不兼容的模组|Could not find net\.fabricmc\.fabric-api/i.test(logText)) {
     fixes.push("fabric-api");
-    notes.push("Fabric API 与 MC 版本不匹配");
+    notes.push(/Could not find net\.fabricmc\.fabric-api/i.test(logText)
+      ? "Fabric API 版本在 Maven 上不存在"
+      : "Fabric API 与 MC 版本不匹配");
   }
 
   if (loader === "forge" && /Mavenizer|mavenizer|Slime Launcher|Could not (download|resolve|GET).*minecraft/i.test(logText)) {
