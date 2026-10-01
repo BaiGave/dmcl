@@ -19,7 +19,7 @@ export const CLIENT_FAIL = [
   /有不兼容的模组/i,
 ];
 
-/** DMCL 可重建 Gradle 缓存的总上限；JDK 不计入此上限。 */
+/** DMCL 可逐文件清理的 Gradle 缓存上限；JDK 和原生运行库不计入。 */
 export const DMCL_GRADLE_CACHE_MAX_BYTES = 24 * 1024 ** 3;
 const CACHE_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
@@ -57,7 +57,9 @@ async function collectRebuildableCacheFiles(dir: string, files: CacheFile[]): Pr
     const entryPath = path.join(dir, entry.name);
     if (entry.isSymbolicLink()) continue;
     if (entry.isDirectory()) {
-      if (["jdks", "dmcl-jdk8"].includes(entry.name.toLowerCase())) continue;
+      // Gradle trusts native-library extraction markers without checking the DLL.
+      // Preserve the directory so pruning cannot leave a marker without its library.
+      if (["jdks", "dmcl-jdk8", "native"].includes(entry.name.toLowerCase())) continue;
       await collectRebuildableCacheFiles(entryPath, files);
       continue;
     }
@@ -73,7 +75,7 @@ async function collectRebuildableCacheFiles(dir: string, files: CacheFile[]): Pr
 
 /**
  * 删除最旧的可重建 Gradle 缓存，避免 DMCL 的隔离目录无限增长。
- * 只扫描 DMCL_HOME/cache 下的 Gradle 用户目录，并跳过所有名为 jdks 的目录。
+ * 只扫描 DMCL_HOME/cache 下的 Gradle 用户目录，保留 JDK 和原生运行库目录。
  */
 export async function pruneDmclGradleCache(
   options: DmclGradleCachePruneOptions = {},

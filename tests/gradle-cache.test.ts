@@ -6,6 +6,39 @@ import path from "node:path";
 import { pruneDmclGradleCache } from "../src/core/gradle.js";
 
 describe("DMCL Gradle cache policy", () => {
+  it("preserves native libraries together with their extraction markers", async () => {
+    const dmclHome = fs.mkdtempSync(path.join(os.tmpdir(), "dmcl-cache-native-"));
+    const originalDmclHome = process.env.DMCL_HOME;
+    process.env.DMCL_HOME = dmclHome;
+    const nativeDirectories = [
+      path.join(dmclHome, "cache", "gradle", "jvm-21", "native", "0.2.8", "x86_64-windows-gnu"),
+      path.join(dmclHome, "cache", "source-gradle", "native", "0.2.8", "x86_64-windows-gnu"),
+    ];
+    const cacheFile = path.join(dmclHome, "cache", "gradle", "jvm-21", "caches", "old.bin");
+    try {
+      for (const nativeDirectory of nativeDirectories) {
+        fs.mkdirSync(nativeDirectory, { recursive: true });
+        fs.writeFileSync(path.join(nativeDirectory, "gradle-fileevents.dll"), "native-library");
+        fs.writeFileSync(path.join(nativeDirectory, "gradle-fileevents.dll.lock"), Buffer.from([1]));
+      }
+      fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+      fs.writeFileSync(cacheFile, "rebuildable");
+
+      const result = await pruneDmclGradleCache({ maxBytes: 0 });
+
+      assert.equal(fs.existsSync(cacheFile), false);
+      assert.equal(result.remainingBytes, 0);
+      for (const nativeDirectory of nativeDirectories) {
+        assert.equal(fs.readFileSync(path.join(nativeDirectory, "gradle-fileevents.dll"), "utf8"), "native-library");
+        assert.deepEqual(fs.readFileSync(path.join(nativeDirectory, "gradle-fileevents.dll.lock")), Buffer.from([1]));
+      }
+    } finally {
+      if (originalDmclHome === undefined) delete process.env.DMCL_HOME;
+      else process.env.DMCL_HOME = originalDmclHome;
+      fs.rmSync(dmclHome, { recursive: true, force: true });
+    }
+  });
+
   it("does not follow a cache-root junction into files outside DMCL", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "dmcl-cache-junction-"));
     const originalDmclHome = process.env.DMCL_HOME;
