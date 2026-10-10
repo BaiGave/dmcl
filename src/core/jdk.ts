@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import AdmZip from "adm-zip";
+import { readBuildScripts, resolveGradleValue } from "./build-script.js";
 import { fetchJson, UA } from "./http.js";
 
 export type JdkLogger = (msg: string) => void;
@@ -193,9 +194,16 @@ export function readMcVersionFromProject(targetDir: string): string | null {
   return null;
 }
 
-/** 从 gradle.properties 读取 Loom 版本 */
+const LOOM_PLUGIN_VERSION =
+  /\bid\s*\(?\s*['"](?:net\.fabricmc\.)?fabric-loom(?:-remap)?['"]\s*\)?\s*version\s*\(?\s*(?:(['"])([^'"\r\n]+)\1|([A-Za-z_][\w.]*))/;
+
+/** 读取 Loom 版本：gradle.properties 的 loom_version，或构建脚本里 `id 'fabric-loom' version '…'` */
 export function readLoomVersion(targetDir: string): string | null {
-  return readGradleProps(targetDir).loom_version ?? null;
+  const props = readGradleProps(targetDir);
+  if (props.loom_version) return props.loom_version;
+  const declared = LOOM_PLUGIN_VERSION.exec(readBuildScripts(targetDir));
+  if (!declared) return null;
+  return resolveGradleValue(declared[2] ?? `\${${declared[3]}}`, props);
 }
 
 /** Loom Gradle 插件运行所需的最低 JVM 主版本 */
@@ -351,6 +359,78 @@ export async function ensureProjectJdk(
   throwIfCancelled(options);
   await injectJdkHome(targetDir, jdkPath);
   log("已写入 org.gradle.java.home");
+}
+
+export interface BuildJdkOptions extends JdkOptions {
+  /** 调用方明确指定的 JDK（如命令行 --java-home）；项目自己配置了 JDK 时以项目为准 */
+  javaHome?: string;
+  /** false: 只使用磁盘上已有的 JDK，不触发自动下载（默认 true） */
+  download?: boolean;
+}
+
+export interface BuildJdk {
+  javaHome: string;
+  /** `java -version` 报告的主版本；无法执行检测时为 null */
+  major: number | null;
+  origin: "project" | "requested" | "dmcl";
+}
+
+function javaBinary(javaHome: string): string {
+  return path.join(javaHome, "bin", process.platform === "win32" ? "java.exe" : "java");
+}
+
+/**
+ * 为一次 Gradle 调用选择 JDK，只返回路径，不写入项目文件（与会写 gradle.properties 的 ensureProjectJdk 相对）。
+ * 项目 gradle.properties 已配置 org.gradle.java.home 时原样沿用，不满足构建需求就报错而不是覆盖；
+ * 否则取调用方指定的 JDK，再取 DMCL 缓存或自动下载的、满足 Gradle/Loom/Minecraft 需求的 JDK。
+ */
+export async function resolveBuildJdk(
+  targetDir: string,
+  mcVersion: string,
+  log: JdkLogger = () => {},
+  options: BuildJdkOptions = {},
+): Promise<BuildJdk> {
+  throwIfCancelled(options);
+  const need = resolveProjectJdkNeed(targetDir, mcVersion);
+  log(`检查 JDK：此构建需要 Java ${need.major}（${need.summary}）`);
+  if (need.incompatibleReason) throw new Error(need.incompatibleReason);
+
+  const gradleVersion = readGradleVersion(targetDir);
+  const maxMajor = gradleVersion ? gradleJvmRange(gradleVersion).max : 25;
+  const legacyForge = usesForgeGradleLegacy(targetDir);
+  const accept = (javaHome: string, origin: BuildJdk["origin"], label: string): BuildJdk => {
+    if (!fs.existsSync(javaBinary(javaHome))) throw new Error(`${label}不存在 java：${javaHome}`);
+    const major = detectJavaMajorAt(javaHome);
+    if (major !== null && (major < need.major || major > maxMajor || (legacyForge && major !== 8))) {
+      const allowed = legacyForge ? "Java 8" : `Java ${need.major}–${maxMajor}`;
+      const hint = origin === "project" ? "；DMCL 不会改写项目的这项配置，请自行调整或移除" : "";
+      throw new Error(`${label}是 Java ${major}，此构建需要 ${allowed}（${need.summary}）：${javaHome}${hint}`);
+    }
+    return { javaHome, major, origin };
+  };
+
+  const configured = readJavaHomeFromProject(targetDir);
+  if (configured) {
+    const chosen = accept(configured, "project", "项目 gradle.properties 配置的 org.gradle.java.home ");
+    log(`沿用项目配置的 JDK ${chosen.major ?? "?"}：${configured}`);
+    return chosen;
+  }
+  if (options.javaHome) {
+    const chosen = accept(path.resolve(options.javaHome), "requested", "指定的 JDK ");
+    log(`使用指定的 JDK ${chosen.major ?? "?"}：${chosen.javaHome}`);
+    return chosen;
+  }
+
+  const cached = findCachedJdk(need.major);
+  if (cached) {
+    log(`使用 DMCL 已缓存的 JDK ${need.major}：${cached}`);
+    return { javaHome: cached, major: need.major, origin: "dmcl" };
+  }
+  throwIfCancelled(options);
+  if (options.download === false) throw new Error(`没有可用的 Java ${need.major}，且未启用自动下载`);
+  log(`未检测到 JDK ${need.major}，开始自动下载（无需事先安装 Java）…`);
+  const downloaded = await ensureJdkInCache(need.major, log, options);
+  return { javaHome: downloaded, major: need.major, origin: "dmcl" };
 }
 
 /** 查询 Adoptium API 获取 JDK 下载链接 */

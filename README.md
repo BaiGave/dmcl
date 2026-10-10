@@ -81,6 +81,17 @@ dcml/
 - **移除后不会自动重新导入**（加入排除列表）；只有手动「扫描导入」才会发现新项目
 - 侧边栏「外部项目」页可管理监视目录，并对所有已注册项目增删改查（改路径/移除）
 
+### 无界面准备参考源码
+
+```bash
+npm run sources:prepare -- <项目变体目录> [--mod-jar <jar> ...]
+```
+
+准备该变体的 Minecraft 源码，并可从本地模组 jar 补充模组源码（同目录有 `-sources.jar` 时直接用，否则 CFR 反编译），逐行打印进度和生成的源码库单元路径
+映射以构建脚本为准：`mappings loom.officialMojangMappings()` 记为 `mojmap`，不会被当成 Yarn
+JDK 按构建需求（Gradle / Loom / Minecraft）选定，只经环境传给本次 Gradle，不写入项目的 `gradle.properties`；项目自己配置了 `org.gradle.java.home` 时沿用，不满足需求则报错而不是覆盖
+目录里已有构建好的加载器源码包（如 `build/moddev/artifacts/*-sources.jar`）时，可加 `--no-gradle --loader <id> --mc <版本> --mapping <映射>` 直接收录；更多选项见 `--help`
+
 ## 生成后
 
 ```bash

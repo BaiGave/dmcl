@@ -204,16 +204,24 @@ export function getIsolatedGradleHome(targetDir?: string): string {
   return dir;
 }
 
+/** 让子进程使用指定 JDK 的环境覆盖项（JAVA_HOME 与 PATH），不触碰项目文件 */
+export function javaHomeEnvOverrides(
+  javaHome: string,
+  base: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const pathKey = Object.keys(base).find((k) => k.toLowerCase() === "path") ?? "Path";
+  return {
+    JAVA_HOME: javaHome,
+    [pathKey]: `${path.join(javaHome, "bin")}${path.delimiter}${base[pathKey] ?? ""}`,
+  };
+}
+
 export function buildGradleEnv(targetDir: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   env.GRADLE_USER_HOME = getIsolatedGradleHome(targetDir);
   ensureDmclHome();
   const javaHome = readJavaHomeFromProject(targetDir);
-  if (javaHome) {
-    env.JAVA_HOME = javaHome;
-    const pathKey = Object.keys(env).find((k) => k.toLowerCase() === "path") ?? "Path";
-    env[pathKey] = `${path.join(javaHome, "bin")};${env[pathKey] ?? ""}`;
-  }
+  if (javaHome) Object.assign(env, javaHomeEnvOverrides(javaHome, env));
   return env;
 }
 
@@ -244,7 +252,8 @@ export function gradleSpawn(
   const cmd = isWin
     ? (process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe")
     : "./gradlew";
-  const cmdArgs = isWin ? ["/c", "gradlew.bat", ...tasks] : tasks;
+  // `.\` keeps this working when NoDefaultCurrentDirectoryInExePath=1 stops cmd from searching the project directory.
+  const cmdArgs = isWin ? ["/c", ".\\gradlew.bat", ...tasks] : tasks;
   const proc = spawn(cmd, cmdArgs, {
     cwd: targetDir,
     env: { ...buildGradleEnv(targetDir), ...envOverrides },
