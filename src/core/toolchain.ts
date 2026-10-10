@@ -6,6 +6,7 @@ import { applyChinaMirror } from "./mirror.js";
 import {
   detectJavaMajorAt,
   ensureProjectJdk,
+  resolveBuildJdk,
   gradleJvmRange,
   pickJdkMajor,
   readGradleVersion,
@@ -14,6 +15,8 @@ import {
   readMcVersionFromProject,
   requiredJavaFor,
   usesForgeGradleLegacy,
+  type BuildJdk,
+  type BuildJdkOptions,
   type JdkLogger,
   type JdkOptions,
 } from "./jdk.js";
@@ -250,6 +253,25 @@ export async function writeToolchainMetadata(
     `${JSON.stringify(meta, null, 2)}\n`,
     "utf8",
   );
+}
+
+/**
+ * 一次性 Gradle 调用（如源码准备）的工具链：分析需求并选定 JDK，但不修改项目文件，
+ * 不写 gradle.properties、不升级 Wrapper；JDK 由调用方经环境传给该次 Gradle 进程。
+ */
+export async function resolveProjectGradleJdk(
+  targetDir: string,
+  mcVersion: string | undefined,
+  log: JdkLogger = () => {},
+  options?: BuildJdkOptions,
+): Promise<BuildJdk> {
+  const toolchain = resolveProjectToolchain(targetDir, mcVersion);
+  if (!toolchain) throw new Error("无法从项目推断 Minecraft 版本");
+  log(`工具链分析：需要 Java ${toolchain.gradleRuntimeJdkMajor}（${toolchain.summary}）`);
+  if (toolchain.incompatibleReason) throw new Error(toolchain.incompatibleReason);
+  const jdk = await resolveBuildJdk(targetDir, toolchain.mcVersion, log, options);
+  if (toolchain.needsForgeMavenizer) await ensureForgeMavenizerJdkCache(targetDir, log, options);
+  return jdk;
 }
 
 /**

@@ -20,6 +20,11 @@ export interface SourceTaskRequest {
   includeGradleDependencies?: boolean;
   /** Include jars from local runtime mod folders in dependency preparation. */
   includeRuntimeMods?: boolean;
+  /**
+   * JDK for the Gradle and CFR runs when the project configures none.
+   * Passed to those processes by environment; the project's files are never edited.
+   */
+  javaHome?: string;
 }
 
 export interface SourceTarget {

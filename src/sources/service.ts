@@ -1,17 +1,25 @@
 import { createHash, randomUUID } from "node:crypto";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import AdmZip from "adm-zip";
 import { downloadFile } from "../core/http.js";
-import { buildGradleEnv, killProcessTree, readJavaHomeFromProject, runGradleTask } from "../core/gradle.js";
-import { ensureProjectToolchain } from "../core/toolchain.js";
+import {
+  buildGradleEnv,
+  javaHomeEnvOverrides,
+  killProcessTree,
+  readJavaHomeFromProject,
+  runGradleTask,
+} from "../core/gradle.js";
+import type { BuildJdk } from "../core/jdk.js";
+import { resolveProjectGradleJdk } from "../core/toolchain.js";
 import { scaffoldProject, pascalCase } from "../core/scaffold.js";
 import { getMetaCache } from "../meta/meta-cache.js";
 import { getMappingsCache } from "../meta/mappings-cache.js";
 import { compareMcVersions, isUnobfuscatedMc } from "../meta/mc-version.js";
 import type { LoaderId, Logger, MappingsId, ProjectOptions } from "../types.js";
+import { detectLoomMappings } from "./project-build.js";
 import {
   getMinecraftSourceUnitDir,
   getModSourceUnitDir,
@@ -48,6 +56,8 @@ const MAX_TASK_LOGS = 240;
 interface MaterializeOptions extends SourceTarget {
   projectPath: string;
   force?: boolean;
+  /** JDK for CFR when the project does not configure one (the same JDK its Gradle run used). */
+  javaHome?: string;
   isCancelled?: () => boolean;
   onProcess?: (proc: ChildProcess, isWin: boolean) => void;
   log?: Logger;
@@ -111,6 +121,11 @@ export function detectProjectMapping(
   fallback: SourceTarget,
 ): Pick<SourceTarget, "mapping" | "mappingVersion"> {
   const props = readProperties(path.join(projectPath, "gradle.properties"));
+  if (fallback.loader === "fabric") {
+    // The `mappings …` line in the Loom script decides what the generated sources are named with.
+    const declared = detectLoomMappings(projectPath, props, fallback.mcVersion);
+    if (declared) return declared;
+  }
   if (props.parchment_version || props.parchment_mappings_version) {
     return {
       mapping: "parchment",
@@ -462,10 +477,10 @@ async function runCfr(
   projectPath: string,
   inputJar: string,
   outputDir: string,
-  options: Pick<MaterializeOptions, "isCancelled" | "onProcess" | "log">,
+  options: Pick<MaterializeOptions, "isCancelled" | "onProcess" | "log" | "javaHome">,
 ): Promise<void> {
   const cfr = await ensureCfr();
-  const javaHome = readJavaHomeFromProject(projectPath);
+  const javaHome = readJavaHomeFromProject(projectPath) ?? options.javaHome;
   const java = javaHome
     ? path.join(javaHome, "bin", process.platform === "win32" ? "java.exe" : "java")
     : "java";
@@ -1034,6 +1049,13 @@ function dependencyResolverScript(): string {
 `;
 }
 
+/** The project's own Gradle environment, with the chosen JDK applied to this process only. */
+function gradleEnvFor(projectPath: string, javaHome?: string): NodeJS.ProcessEnv {
+  const env = buildGradleEnv(projectPath);
+  if (javaHome) Object.assign(env, javaHomeEnvOverrides(javaHome, env));
+  return env;
+}
+
 function runtimeModRoots(projectPath: string): string[] {
   return [
     path.join(projectPath, "run", "mods"),
@@ -1067,7 +1089,7 @@ function resolveSelectedRuntimeMods(projectPath: string, selectedPaths?: string[
 
 async function resolveModDependencies(
   projectPath: string,
-  options: Pick<MaterializeOptions, "isCancelled" | "onProcess" | "log"> & {
+  options: Pick<MaterializeOptions, "isCancelled" | "onProcess" | "log" | "javaHome"> & {
     onDependencyProgress?: (found: number, prepared: number, failures: number) => void;
     runtimeModPaths?: string[];
     includeGradleDependencies?: boolean;
@@ -1117,7 +1139,7 @@ async function resolveModDependencies(
     {
       isCancelled: options.isCancelled,
       onProc: options.onProcess,
-      env: buildGradleEnv(projectPath),
+      env: gradleEnvFor(projectPath, options.javaHome),
       timeoutMs: 90 * 1000,
     },
   ).finally(() => clearInterval(heartbeat));
@@ -1232,7 +1254,7 @@ async function materializeModSource(
   target: SourceTarget,
   dep: ResolvedModDependency,
   force: boolean,
-  options: Pick<MaterializeOptions, "isCancelled" | "onProcess" | "log">,
+  options: Pick<MaterializeOptions, "isCancelled" | "onProcess" | "log" | "javaHome">,
 ): Promise<ModSourceEntry> {
   const artifactSha256 = await sha256File(dep.file);
   const finalDir = getModSourceUnitDir(
@@ -1323,6 +1345,8 @@ export interface ExternalModSourceMaterializeOptions {
   license?: ModSourceEntry["license"];
   confidence?: ModSourceEntry["confidence"];
   force?: boolean;
+  /** JDK that runs CFR when the project does not configure one. */
+  javaHome?: string;
   isCancelled?: () => boolean;
   onProcess?: (proc: ChildProcess, isWin: boolean) => void;
   log?: Logger;
@@ -1416,24 +1440,51 @@ export async function materializeExternalModSource(
   }
 }
 
-async function ensureProjectGitExclude(projectPath: string): Promise<void> {
-  const gitDir = path.join(projectPath, ".git");
-  let localGitDir: string | null = null;
-  if (fs.existsSync(gitDir) && fs.statSync(gitDir).isDirectory()) localGitDir = gitDir;
-  else if (fs.existsSync(gitDir) && fs.statSync(gitDir).isFile()) {
-    const pointer = /^gitdir:\s*(.+)$/im.exec(await fs.promises.readFile(gitDir, "utf8"))?.[1]?.trim();
-    if (pointer) localGitDir = path.resolve(projectPath, pointer);
-  }
-  if (localGitDir) {
-    const commonDirFile = path.join(localGitDir, "commondir");
-    if (fs.existsSync(commonDirFile)) {
-      localGitDir = path.resolve(localGitDir, (await fs.promises.readFile(commonDirFile, "utf8")).trim());
+/** Nearest enclosing Git work tree: its top directory and the shared Git directory that holds info/exclude. */
+function findEnclosingGitRepo(start: string): { top: string; commonDir: string } | null {
+  for (let dir = path.resolve(start); ; dir = path.dirname(dir)) {
+    const dotGit = path.join(dir, ".git");
+    let gitDir: string | null = null;
+    try {
+      const stat = fs.statSync(dotGit);
+      if (stat.isDirectory()) gitDir = dotGit;
+      else {
+        const pointer = /^gitdir:\s*(.+)$/im.exec(fs.readFileSync(dotGit, "utf8"))?.[1]?.trim();
+        if (pointer) gitDir = path.resolve(dir, pointer);
+      }
+    } catch { /* no .git here */ }
+    if (gitDir) {
+      const commonDirFile = path.join(gitDir, "commondir");
+      if (fs.existsSync(commonDirFile)) gitDir = path.resolve(gitDir, fs.readFileSync(commonDirFile, "utf8").trim());
+      return { top: dir, commonDir: gitDir };
     }
-    const exclude = path.join(localGitDir, "info", "exclude");
+    if (path.dirname(dir) === dir) return null;
+  }
+}
+
+function gitIgnores(top: string, target: string): boolean {
+  return spawnSync("git", ["-C", top, "check-ignore", "-q", "--", target], {
+    stdio: "ignore",
+    timeout: 10_000,
+  }).status === 0;
+}
+
+/**
+ * Keeps the generated `.dmcl/` out of Git without touching tracked files.
+ * Variants nested in a larger repository (Linker's apps/minecraft/*) are covered by that repository's own
+ * ignore rules or, failing that, by its local info/exclude - never by a new .gitignore inside the project.
+ */
+async function ensureProjectGitExclude(projectPath: string): Promise<void> {
+  const repo = findEnclosingGitRepo(projectPath);
+  if (repo) {
+    if (gitIgnores(repo.top, path.join(projectPath, ".dmcl", "sources", "index.json"))) return;
+    const relative = path.relative(repo.top, path.resolve(projectPath)).split(path.sep).filter(Boolean).join("/");
+    const entry = `/${relative ? `${relative}/` : ""}.dmcl/`;
+    const exclude = path.join(repo.commonDir, "info", "exclude");
     await fs.promises.mkdir(path.dirname(exclude), { recursive: true });
     const current = fs.existsSync(exclude) ? await fs.promises.readFile(exclude, "utf8") : "";
-    if (!/(^|\n)\/?\.dmcl\/(\n|$)/.test(current)) {
-      await fs.promises.appendFile(exclude, `${current && !current.endsWith("\n") ? "\n" : ""}/.dmcl/\n`, "utf8");
+    if (!current.split(/\r?\n/).some((line) => line.trim() === entry)) {
+      await fs.promises.appendFile(exclude, `${current && !current.endsWith("\n") ? "\n" : ""}${entry}\n`, "utf8");
     }
     return;
   }
@@ -1498,7 +1549,7 @@ async function writeProjectSourceReadme(root: string): Promise<void> {
   );
 }
 
-function readProjectSourceIndex(root: string): ProjectSourceIndex | null {
+export function readProjectSourceIndex(root: string): ProjectSourceIndex | null {
   try {
     const index = JSON.parse(fs.readFileSync(path.join(root, "index.json"), "utf8")) as ProjectSourceIndex;
     return index.schema === 1 && Array.isArray(index.mods) ? index : null;
@@ -1652,7 +1703,7 @@ async function prepareProjectSources(
   target: SourceTarget,
   minecraft: MinecraftSourceEntry,
   force: boolean,
-  options: Pick<MaterializeOptions, "isCancelled" | "onProcess" | "log"> & {
+  options: Pick<MaterializeOptions, "isCancelled" | "onProcess" | "log" | "javaHome"> & {
     onDependencyProgress?: (found: number, prepared: number, failures: number) => void;
     runtimeModPaths?: string[];
     includeGradleDependencies?: boolean;
@@ -1731,6 +1782,8 @@ class MinecraftSourceManager {
   private task: SourceTaskSnapshot | null = null;
   private cancelRequested = false;
   private currentProcess: { proc: ChildProcess; isWin: boolean } | null = null;
+  /** JDK chosen for the project being prepared; one choice serves the whole task. */
+  private projectJdk: { key: string; jdk: Promise<BuildJdk> } | null = null;
 
   status(): SourceCenterStatus {
     fs.mkdirSync(getSourceVaultRoot(), { recursive: true });
@@ -1746,6 +1799,7 @@ class MinecraftSourceManager {
   start(request: SourceTaskRequest): SourceTaskSnapshot {
     if (this.task?.state === "running") throw new Error("已有源码任务正在运行");
     this.cancelRequested = false;
+    this.projectJdk = null;
     this.task = {
       id: randomUUID(),
       state: "running",
@@ -1781,6 +1835,27 @@ class MinecraftSourceManager {
 
   private trackProcess(proc: ChildProcess, isWin: boolean): void {
     this.currentProcess = { proc, isWin };
+  }
+
+  /** Picks the JDK for this project's Gradle runs without editing its files; passed to Gradle by environment. */
+  private resolveJdk(
+    projectPath: string,
+    mcVersion: string,
+    request: SourceTaskRequest,
+    download = true,
+  ): Promise<BuildJdk> {
+    const key = `${path.resolve(projectPath)}|${mcVersion}`;
+    if (this.projectJdk?.key !== key) {
+      this.projectJdk = {
+        key,
+        jdk: resolveProjectGradleJdk(projectPath, mcVersion, (line) => this.log(line), {
+          isCancelled: () => this.cancelRequested,
+          javaHome: request.javaHome,
+          download,
+        }),
+      };
+    }
+    return this.projectJdk.jdk;
   }
 
   private async prepareTarget(target: SourceTarget, request: SourceTaskRequest): Promise<MinecraftSourceEntry | null> {
@@ -1847,6 +1922,7 @@ class MinecraftSourceManager {
           ...actualTarget,
           projectPath: jobPath,
           force: request.force,
+          javaHome: request.javaHome,
           isCancelled: () => this.cancelRequested,
           onProcess: (proc, isWin) => this.trackProcess(proc, isWin),
           log: (line) => this.log(line),
@@ -1859,9 +1935,7 @@ class MinecraftSourceManager {
         this.currentProcess = null;
       }
     }
-    await ensureProjectToolchain(jobPath, target.mcVersion, (line) => this.log(line), {
-      isCancelled: () => this.cancelRequested,
-    });
+    const jdk = await this.resolveJdk(jobPath, target.mcVersion, request);
     if (this.cancelRequested) throw new Error("已取消");
 
     this.task!.currentPhase = "mapping";
@@ -1879,7 +1953,7 @@ class MinecraftSourceManager {
     }, {
       isCancelled: () => this.cancelRequested,
       onProc: (proc, isWin) => this.trackProcess(proc, isWin),
-      env: { GRADLE_USER_HOME: getSourceGradleHome() },
+      env: { GRADLE_USER_HOME: getSourceGradleHome(), ...javaHomeEnvOverrides(jdk.javaHome) },
     });
     this.currentProcess = null;
     if (this.cancelRequested) throw new Error("已取消");
@@ -1890,6 +1964,7 @@ class MinecraftSourceManager {
       ...actualTarget,
       projectPath: jobPath,
       force: request.force,
+      javaHome: jdk.javaHome,
       isCancelled: () => this.cancelRequested,
       onProcess: (proc, isWin) => this.trackProcess(proc, isWin),
       log: (line) => this.log(line),
@@ -1904,7 +1979,11 @@ class MinecraftSourceManager {
   private async run(request: SourceTaskRequest): Promise<void> {
     if (!this.task) return;
     try {
-      const targets = await planSourceTargets(request);
+      const planned = await planSourceTargets(request);
+      // A project's build script decides the mapping; look units up under that name, not the loader default.
+      const targets = request.projectPath
+        ? planned.map((target) => ({ ...target, ...detectProjectMapping(path.resolve(request.projectPath!), target) }))
+        : planned;
       this.task.total = targets.length;
       if (targets.length === 0) throw new Error("该加载器没有可处理的 Minecraft 版本");
       this.log(`计划处理 ${targets.length} 个版本`);
@@ -1938,6 +2017,12 @@ class MinecraftSourceManager {
             counted = true;
             const actualTarget = this.task.current ?? target;
             this.task.currentPhase = request.includeDependencies === false ? "linking" : "dependencies";
+            const dependencyJdk = request.includeDependencies === false || request.includeGradleDependencies === false
+              ? undefined
+              : await this.resolveJdk(request.projectPath, target.mcVersion, request, false).catch((err: Error) => {
+                this.log(`依赖解析将使用默认 JDK：${err.message}`);
+                return undefined;
+              });
             const projection = request.includeDependencies === false
               ? {
                 rootPath: await writeProjectSourceProjection(
@@ -1954,6 +2039,7 @@ class MinecraftSourceManager {
                 minecraftEntry,
                 request.force === true,
                 {
+                  javaHome: dependencyJdk?.javaHome,
                   isCancelled: () => this.cancelRequested,
                   onProcess: (proc, isWin) => this.trackProcess(proc, isWin),
                   log: (line) => this.log(line),
