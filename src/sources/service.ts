@@ -807,49 +807,68 @@ function zipText(zip: AdmZip, entryName: string): string | null {
   try { return entry.getData().toString("utf8"); } catch { return null; }
 }
 
-export function detectModMetadata(file: string, fallbackName: string, fallbackVersion: string): {
-  modId: string;
-  modName: string;
-  modVersion: string;
-} | null {
+type ModMetadata = { modId: string; modName: string; modVersion: string };
+
+/** The first `[[mods]]` table of a mods.toml, so dependency tables and comments cannot be mistaken for the mod. */
+function firstModsTable(toml: string): string {
+  const header = /^[ \t]*\[\[mods\]\][ \t]*$/m.exec(toml);
+  if (!header) return toml;
+  const rest = toml.slice(header.index + header[0].length);
+  const next = /^[ \t]*\[/m.exec(rest);
+  return next ? rest.slice(0, next.index) : rest;
+}
+
+/**
+ * Reads a mod's id, name and version from its jar metadata.
+ * A jar can carry several loaders' metadata (a multi-loader build ships fabric.mod.json next to neoforge.mods.toml),
+ * so pass the loader the jar is used with to read that loader's file first.
+ */
+export function detectModMetadata(
+  file: string,
+  fallbackName: string,
+  fallbackVersion: string,
+  loader?: LoaderId,
+): ModMetadata | null {
   try {
     const zip = new AdmZip(file);
-    const fabric = zipText(zip, "fabric.mod.json");
-    if (fabric) {
+    const declared = (version: string | undefined) =>
+      version && !version.includes("${") ? version : fallbackVersion;
+
+    const fromFabric = (): ModMetadata | null => {
+      const fabric = zipText(zip, "fabric.mod.json");
+      if (!fabric) return null;
       const parsed = JSON.parse(fabric) as { id?: string; name?: string; version?: string };
-      if (parsed.id) return {
-        modId: parsed.id,
-        modName: parsed.name || parsed.id,
-        modVersion: typeof parsed.version === "string" && !parsed.version.includes("${")
-          ? parsed.version
-          : fallbackVersion,
-      };
-    }
-
-    const toml = zipText(zip, "META-INF/neoforge.mods.toml")
-      ?? zipText(zip, "META-INF/mods.toml");
-    if (toml) {
-      const modId = /\bmodId\s*=\s*["']([^"']+)["']/.exec(toml)?.[1];
-      if (modId) {
-        const name = /\bdisplayName\s*=\s*["']([^"']+)["']/.exec(toml)?.[1];
-        const declaredVersion = /\bversion\s*=\s*["']([^"']+)["']/.exec(toml)?.[1];
-        return {
-          modId,
-          modName: name || modId,
-          modVersion: declaredVersion && !declaredVersion.includes("${") ? declaredVersion : fallbackVersion,
-        };
-      }
-    }
-
-    const legacy = zipText(zip, "mcmod.info");
-    if (legacy) {
+      return parsed.id
+        ? { modId: parsed.id, modName: parsed.name || parsed.id, modVersion: declared(typeof parsed.version === "string" ? parsed.version : undefined) }
+        : null;
+    };
+    const fromToml = (): ModMetadata | null => {
+      const toml = zipText(zip, "META-INF/neoforge.mods.toml")
+        ?? zipText(zip, "META-INF/mods.toml");
+      if (!toml) return null;
+      const table = firstModsTable(toml);
+      const modId = /^[ \t]*modId[ \t]*=[ \t]*["']([^"']+)["']/m.exec(table)?.[1];
+      if (!modId) return null;
+      const name = /^[ \t]*displayName[ \t]*=[ \t]*["']([^"']+)["']/m.exec(table)?.[1];
+      const version = /^[ \t]*version[ \t]*=[ \t]*["']([^"']+)["']/m.exec(table)?.[1];
+      return { modId, modName: name || modId, modVersion: declared(version) };
+    };
+    const fromLegacy = (): ModMetadata | null => {
+      const legacy = zipText(zip, "mcmod.info");
+      if (!legacy) return null;
       const parsed = JSON.parse(legacy) as Array<{ modid?: string; name?: string; version?: string }>;
       const first = Array.isArray(parsed) ? parsed.find((item) => item.modid) : undefined;
-      if (first?.modid) return {
-        modId: first.modid,
-        modName: first.name || first.modid,
-        modVersion: first.version && !first.version.includes("${") ? first.version : fallbackVersion,
-      };
+      return first?.modid
+        ? { modId: first.modid, modName: first.name || first.modid, modVersion: declared(first.version) }
+        : null;
+    };
+
+    const order = loader === "fabric" || loader === undefined
+      ? [fromFabric, fromToml, fromLegacy]
+      : [fromToml, fromLegacy, fromFabric];
+    for (const read of order) {
+      const found = read();
+      if (found) return found;
     }
   } catch { /* not a readable mod jar */ }
   return null;
@@ -1549,7 +1568,7 @@ async function writeProjectSourceReadme(root: string): Promise<void> {
   );
 }
 
-export function readProjectSourceIndex(root: string): ProjectSourceIndex | null {
+function readProjectSourceIndex(root: string): ProjectSourceIndex | null {
   try {
     const index = JSON.parse(fs.readFileSync(path.join(root, "index.json"), "utf8")) as ProjectSourceIndex;
     return index.schema === 1 && Array.isArray(index.mods) ? index : null;
@@ -1979,16 +1998,16 @@ class MinecraftSourceManager {
   private async run(request: SourceTaskRequest): Promise<void> {
     if (!this.task) return;
     try {
-      const planned = await planSourceTargets(request);
-      // A project's build script decides the mapping; look units up under that name, not the loader default.
-      const targets = request.projectPath
-        ? planned.map((target) => ({ ...target, ...detectProjectMapping(path.resolve(request.projectPath!), target) }))
-        : planned;
+      const targets = await planSourceTargets(request);
       this.task.total = targets.length;
       if (targets.length === 0) throw new Error("该加载器没有可处理的 Minecraft 版本");
       this.log(`计划处理 ${targets.length} 个版本`);
-      for (const target of targets) {
+      for (const planned of targets) {
         if (this.cancelRequested) break;
+        // A project's build script decides the mapping; look the unit up under that name, not the loader default.
+        const target = request.projectPath
+          ? { ...planned, ...detectProjectMapping(path.resolve(request.projectPath), planned) }
+          : planned;
         this.task.current = target;
         let counted = false;
         try {

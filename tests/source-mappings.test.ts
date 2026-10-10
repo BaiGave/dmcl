@@ -10,6 +10,7 @@ import { pickJdkMajor, readLoomVersion, resolveBuildJdk } from "../src/core/jdk.
 import { getMinecraftSourceUnitDir } from "../src/sources/paths.js";
 import { detectSourceProjectTarget } from "../src/sources/project-build.js";
 import {
+  detectModMetadata,
   detectProjectMapping,
   getMinecraftSourceStatus,
   projectExternalModSource,
@@ -288,5 +289,51 @@ describe("project Git exclusion", { skip: !gitAvailable }, () => {
     const exclude = fs.readFileSync(path.join(root, "repo", ".git", "info", "exclude"), "utf8");
     assert.match(exclude, /^\/apps\/minecraft\/fabric-1\.20\.1\/\.dmcl\/$/m);
     assert.equal(git(["check-ignore", "apps/minecraft/fabric-1.20.1/.dmcl/sources/index.json"]).trim(), "apps/minecraft/fabric-1.20.1/.dmcl/sources/index.json");
+  });
+});
+
+describe("mod jar metadata", () => {
+  function jar(root: string, entries: Record<string, string>): string {
+    const file = path.join(root, "mod.jar");
+    const zip = new AdmZip();
+    for (const [name, content] of Object.entries(entries)) zip.addFile(name, Buffer.from(content));
+    zip.writeZip(file);
+    return file;
+  }
+
+  it("reads the loader's own metadata from a jar that carries several loaders' files", () => {
+    const root = tempRoot("dmcl-multiloader-");
+    const file = jar(root, {
+      "fabric.mod.json": JSON.stringify({ id: "elementa", name: "Elementa", version: "743" }),
+      "META-INF/neoforge.mods.toml": [
+        "modLoader = \"javafml\"",
+        "# modId = \"decoy\"",
+        "[[mods]]",
+        "modId = \"mtr\"",
+        "displayName = \"Minecraft Transit Railway\"",
+        "version = \"4.1.0-beta.2\"",
+        "[[dependencies.mtr]]",
+        "modId = \"neoforge\"",
+        "versionRange = \"[21,)\"",
+      ].join("\n"),
+    });
+    assert.deepEqual(detectModMetadata(file, "fallback", "local", "neoforge"), {
+      modId: "mtr",
+      modName: "Minecraft Transit Railway",
+      modVersion: "4.1.0-beta.2",
+    });
+    assert.equal(detectModMetadata(file, "fallback", "local", "fabric")?.modId, "elementa");
+    assert.equal(detectModMetadata(file, "fallback", "local")?.modId, "elementa");
+  });
+
+  it("falls back to the file-derived version for unresolved template placeholders", () => {
+    const file = jar(tempRoot("dmcl-placeholder-"), {
+      "META-INF/neoforge.mods.toml": "[[mods]]\nmodId = \"ctm\"\nversion = \"${file.jarVersion}\"\n",
+    });
+    assert.deepEqual(detectModMetadata(file, "CTM", "1.21-1.2.1+3", "neoforge"), {
+      modId: "ctm",
+      modName: "ctm",
+      modVersion: "1.21-1.2.1+3",
+    });
   });
 });
