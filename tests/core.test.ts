@@ -9,6 +9,8 @@ import { mojangLibraryAppliesToCurrentOs, collectMavenizerLibraryArtifacts } fro
 import { pascalCase } from "../src/core/scaffold.js";
 import { serializeMatrixResult } from "../src/workspace/matrix.js";
 import { detectProject } from "../src/workspace/detect.js";
+import { repairCrossLoaderProject } from "../src/workspace/cross-loader.js";
+import { resolveProjectToolchain } from "../src/core/toolchain.js";
 import { inferModDir } from "../src/workspace/project-meta.js";
 import {
   neoMdkFallbackCandidates,
@@ -151,6 +153,76 @@ describe("project detection", () => {
         mappings: "mojmap",
         projectPath,
       });
+    } finally {
+      fs.rmSync(projectPath, { recursive: true, force: true });
+    }
+  });
+
+  // Linker variants keep loader keys out of gradle.properties; only the build script plugins tell them apart.
+  const writeLinkerVariant = (projectPath: string, plugin: string, props: string[]) => {
+    fs.writeFileSync(path.join(projectPath, "gradlew.bat"), "@echo off\r\n", "utf8");
+    fs.writeFileSync(path.join(projectPath, "build.gradle"), `plugins {\n    ${plugin}\n}\n`, "utf8");
+    fs.writeFileSync(path.join(projectPath, "gradle.properties"), [
+      ...props,
+      "mod_id=linker",
+      "mod_version=1.0.4",
+      "mod_group_id=io.github.baigave.linker",
+    ].join("\n") + "\n", "utf8");
+  };
+
+  it("recognizes a Fabric project whose properties only carry mod_id and fabric_* keys", () => {
+    const projectPath = fs.mkdtempSync(path.join(os.tmpdir(), "dmcl-detect-loom-"));
+    try {
+      writeLinkerVariant(projectPath, "id 'fabric-loom' version '1.14.10'", [
+        "minecraft_version=1.20.1",
+        "fabric_loader_version=0.18.4",
+        "fabric_api_version=0.92.7+1.20.1",
+      ]);
+      assert.equal(detectProject(projectPath)?.loader, "fabric");
+      const toolchain = resolveProjectToolchain(projectPath);
+      assert.equal(toolchain?.loader, "fabric");
+      assert.equal(toolchain?.loomVersion, "1.14.10");
+    } finally {
+      fs.rmSync(projectPath, { recursive: true, force: true });
+    }
+  });
+
+  it("recognizes ModDevGradle legacyforge as Forge", () => {
+    const projectPath = fs.mkdtempSync(path.join(os.tmpdir(), "dmcl-detect-legacyforge-"));
+    try {
+      writeLinkerVariant(projectPath, "id 'net.neoforged.moddev.legacyforge' version '2.0.141'", [
+        "minecraft_version=1.20.1",
+        "forge_version=47.3.0",
+      ]);
+      assert.equal(detectProject(projectPath)?.loader, "forge");
+      assert.equal(resolveProjectToolchain(projectPath)?.loader, "forge");
+    } finally {
+      fs.rmSync(projectPath, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("cross-loader repair", () => {
+  it("leaves imported projects untouched", async () => {
+    const projectPath = fs.mkdtempSync(path.join(os.tmpdir(), "dmcl-cross-loader-"));
+    try {
+      const resources = path.join(projectPath, "src", "main", "resources");
+      const javaDir = path.join(projectPath, "src", "main", "java", "com", "example");
+      fs.mkdirSync(resources, { recursive: true });
+      fs.mkdirSync(javaDir, { recursive: true });
+      const modJson = path.join(resources, "fabric.mod.json");
+      const entrypoint = path.join(javaDir, "Entry.java");
+      fs.writeFileSync(modJson, "{}\n", "utf8");
+      fs.writeFileSync(entrypoint, "import net.fabricmc.api.ModInitializer;\n", "utf8");
+
+      const repaired = await repairCrossLoaderProject(
+        projectPath, "example", "Example", "com.example", "forge", "1.20.1",
+      );
+
+      assert.equal(repaired, false);
+      assert.ok(fs.existsSync(modJson));
+      assert.ok(fs.existsSync(entrypoint));
+      assert.deepEqual(fs.readdirSync(javaDir), ["Entry.java"]);
     } finally {
       fs.rmSync(projectPath, { recursive: true, force: true });
     }

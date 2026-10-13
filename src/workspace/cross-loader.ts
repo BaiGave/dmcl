@@ -3,6 +3,7 @@ import path from "node:path";
 import type { LoaderId } from "../types.js";
 import { compareMcVersions } from "../meta/mc-version.js";
 import { pascalCase } from "../core/scaffold.js";
+import { hasScaffoldMarker } from "../core/toolchain.js";
 import type { Logger } from "../types.js";
 
 async function copyDir(src: string, dest: string): Promise<void> {
@@ -158,6 +159,8 @@ export async function repairCrossLoaderProject(
   log: Logger = () => {},
 ): Promise<boolean> {
   if (loader !== "forge") return false;
+  // 只修 DMCL 生成的变体；导入项目的源码归作者，不能删除或改写
+  if (!hasScaffoldMarker(targetDir)) return false;
   if (!hasForeignLoaderJava(targetDir, loader) && !fs.existsSync(path.join(targetDir, "src", "main", "resources", "fabric.mod.json"))) {
     return false;
   }

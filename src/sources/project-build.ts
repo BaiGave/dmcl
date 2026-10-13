@@ -1,6 +1,6 @@
 import { readMcVersionFromProject } from "../core/jdk.js";
 import { readBuildScripts, resolveGradleValue } from "../core/build-script.js";
-import { detectProject } from "../workspace/detect.js";
+import { detectProjectLoader } from "../workspace/loader-detect.js";
 import type { LoaderId, MappingsId } from "../types.js";
 
 export interface DeclaredMapping {
@@ -42,17 +42,6 @@ export function detectLoomMappings(
     if (version) return { mapping: "yarn", mappingVersion: version };
   }
   return null;
-}
-
-/** 从构建脚本与属性判断项目的加载器；先看脚本，因为 Linker 变体的 gradle.properties 不带加载器专属键 */
-export function detectProjectLoader(projectPath: string): LoaderId | null {
-  const script = readBuildScripts(projectPath);
-  if (/\bfabric-loom\b/.test(script)) return "fabric";
-  // ModDevGradle's legacyforge plugin builds Forge (1.20.1 and older) under the net.neoforged group.
-  if (/\bnet\.neoforged\.moddev\.legacyforge\b/.test(script)) return "forge";
-  if (/\bnet\.neoforged\b/.test(script)) return "neoforge";
-  if (/\bnet\.minecraftforge\b/.test(script)) return "forge";
-  return detectProject(projectPath)?.loader ?? null;
 }
 
 /** 无界面准备源码时从项目目录推断目标；任一项推断不出就返回 null，由调用方要求显式指定 */
