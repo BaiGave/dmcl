@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import type { BuildStatus, ModStatus, VariantSource } from "./types.js";
+import type { BuildStatus, ModStatus, VariantResult, VariantSource } from "./types.js";
 
 export const VARIANT_META_DIR = ".dmcl";
 export const VARIANT_META_FILE = "variant.json";
@@ -20,6 +20,7 @@ export interface VariantMetaFile {
   id: string;
   buildStatus: BuildStatus;
   lastBuiltAt?: string;
+  lastResult?: VariantResult;
   source: VariantSource;
   createdAt: string;
 }

@@ -42,6 +42,8 @@ export {
   recordVersionVerification,
   verificationFilePath,
   verificationKey,
+  projectVerificationKey,
+  migrateVerificationIndex,
   versionVerificationStamp,
   writeVersionVerificationIndex,
 } from "./version-verification.js";

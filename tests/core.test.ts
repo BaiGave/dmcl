@@ -626,8 +626,8 @@ describe("MetaCache staleness", () => {
   });
 
 
-  it("recommends conservative Gradle build concurrency for batch safety", async () => {
-    const { recommendGradleBuildConcurrency } = await import("../gui/cpu-concurrency.js");
+  it("recommends conservative CLI matrix Gradle parallelism", async () => {
+    const { recommendGradleBuildConcurrency } = await import("../src/core/concurrency.js");
     assert.equal(recommendGradleBuildConcurrency(16), 6);
     assert.equal(recommendGradleBuildConcurrency(8), 4);
     assert.equal(recommendGradleBuildConcurrency(4), 2);

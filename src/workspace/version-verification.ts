@@ -8,6 +8,8 @@ export type VerificationPhase = "build" | "client";
 export type VerificationState = "verified" | "build-only" | "failed" | "unknown";
 
 export interface VersionVerificationRecord {
+  /** "template": DMCL's own generated verification project for loader+MC; "project": a user's variant. */
+  scope?: "template" | "project";
   loader: LoaderId;
   mcVersion: string;
   buildVerified: boolean;
@@ -24,11 +26,13 @@ export interface VersionVerificationRecord {
 }
 
 export interface VersionVerificationFile {
-  version: 1;
+  version: 1 | 2;
   records: Record<string, VersionVerificationRecord>;
 }
 
 export interface RecordVerificationInput {
+  /** Defaults to "project" when a variantId is given, else "template". */
+  scope?: "template" | "project";
   loader: LoaderId;
   mcVersion: string;
   jobType: VerificationJobType;
@@ -58,12 +62,46 @@ export function verificationFilePath(): string {
   return process.env.DMCL_VERSION_VERIFICATION_FILE || VERSION_VERIFICATION_FILE;
 }
 
+/** Key of DMCL's template verification for a loader + Minecraft version (what the version plan reads). */
 export function verificationKey(loader: LoaderId, mcVersion: string): string {
   return `${loader}:${mcVersion}`;
 }
 
+/** Key of one user variant's result: project path + variant id, so projects never overwrite each other. */
+export function projectVerificationKey(projectPath: string, variantId?: string): string {
+  const normalized = path.resolve(projectPath).split(path.sep).join("/");
+  return `project:${process.platform === "win32" ? normalized.toLowerCase() : normalized}#${variantId ?? ""}`;
+}
+
 function emptyFile(): VersionVerificationFile {
-  return { version: 1, records: {} };
+  return { version: 2, records: {} };
+}
+
+function isInside(child: string, parent: string): boolean {
+  const rel = path.relative(path.resolve(parent), path.resolve(child));
+  return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
+/**
+ * Version 1 keyed everything by loader:mc, so user projects (e.g. Linker) and test fixtures overwrote
+ * DMCL's template results. Version 2 moves records that came from a variant (they carry
+ * lastVariantId) to project keys and drops records of temporary test projects.
+ */
+export function migrateVerificationIndex(index: VersionVerificationFile): VersionVerificationFile {
+  if (index.version === 2) return index;
+  const records: Record<string, VersionVerificationRecord> = {};
+  const tmp = os.tmpdir();
+  for (const [key, record] of Object.entries(index.records)) {
+    if (record.lastProjectPath && isInside(record.lastProjectPath, tmp)) continue;
+    if (key.startsWith("project:")) {
+      records[key] = record;
+    } else if (record.lastVariantId && record.lastProjectPath) {
+      records[projectVerificationKey(record.lastProjectPath, record.lastVariantId)] = { ...record, scope: "project" };
+    } else {
+      records[key] = { ...record, scope: "template" };
+    }
+  }
+  return { version: 2, records };
 }
 
 export function readVersionVerificationIndex(): VersionVerificationFile {
@@ -71,7 +109,7 @@ export function readVersionVerificationIndex(): VersionVerificationFile {
   try {
     if (!fs.existsSync(file)) return emptyFile();
     const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as VersionVerificationFile;
-    if (parsed.version === 1 && parsed.records) return parsed;
+    if ((parsed.version === 1 || parsed.version === 2) && parsed.records) return migrateVerificationIndex(parsed);
   } catch {
     // Rebuild a fresh index on malformed or partially written files.
   }
@@ -118,7 +156,10 @@ export function summarizeVersionVerification(
 
 export function recordVersionVerification(input: RecordVerificationInput): VersionVerificationRecord {
   const index = readVersionVerificationIndex();
-  const key = verificationKey(input.loader, input.mcVersion);
+  const scope = input.scope ?? (input.variantId ? "project" : "template");
+  const key = scope === "project" && input.projectPath
+    ? projectVerificationKey(input.projectPath, input.variantId)
+    : verificationKey(input.loader, input.mcVersion);
   const now = input.at ?? new Date().toISOString();
   const previous = index.records[key];
   const buildSucceeded = input.buildSuccess === true;
@@ -127,6 +168,7 @@ export function recordVersionVerification(input: RecordVerificationInput): Versi
   const clientFailed = input.clientSuccess === false;
 
   const next: VersionVerificationRecord = {
+    scope,
     loader: input.loader,
     mcVersion: input.mcVersion,
     buildVerified: previous?.buildVerified ?? false,

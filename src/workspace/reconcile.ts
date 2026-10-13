@@ -38,9 +38,6 @@ export function relocateVariant(
   store.updateVariantPath(variantId, resolved);
   store.removeExcludedPath(resolved);
 
-  if (detected.modVersion) {
-    store.updateVariantBuildStatus(variantId, found.variant.buildStatus, detected.modVersion);
-  }
 
   return { ok: true };
 }

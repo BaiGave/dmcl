@@ -508,7 +508,7 @@ async function processVariantBatchJob(jobId: string): Promise<void> {
           if (cancelRequested.has(jobId)) {
             target.status = "cancelled";
             target.message = "已取消";
-            if (target.variantId) store.updateVariantBuildStatus(target.variantId, "failed");
+            if (target.variantId) store.updateVariantBuildStatus(target.variantId, "cancelled");
           } else if (result.success) {
             target.status = "done";
             target.message = job!.buildOnly ? "构建验证通过" : "创建并验证完成";
@@ -521,7 +521,7 @@ async function processVariantBatchJob(jobId: string): Promise<void> {
           if (cancelRequested.has(jobId)) {
             target.status = "cancelled";
             target.message = "已取消";
-            if (target.variantId) store.updateVariantBuildStatus(target.variantId, "failed");
+            if (target.variantId) store.updateVariantBuildStatus(target.variantId, "cancelled");
           } else {
             target.status = "failed";
             target.error = (err as Error).message;

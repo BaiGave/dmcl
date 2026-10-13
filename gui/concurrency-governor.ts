@@ -1,107 +1,132 @@
-import type { ConcurrencyLimits } from "./cpu-concurrency";
-import {
-  getEffectiveConcurrencyLimits,
-  loadConcurrencySettingsFromDisk,
-  saveConcurrencyUserSettings,
-  resetConcurrencyUserSettings,
-  type ConcurrencyUserSettings,
-} from "./concurrency-settings";
+import { loadDist, repoDist } from "./dist-loader";
 
-class Semaphore {
-  private active = 0;
-  private readonly waiters: Array<() => void> = [];
+/**
+ * GUI facade over the core scheduler (dist/core/scheduler.js) and its settings
+ * (dist/core/host-concurrency.js). There is one scheduler per process: the build queue, batch jobs
+ * and the version verifier all take their Gradle/client slots from it.
+ */
 
-  constructor(private readonly limit: () => number) {}
-
-  get activeCount(): number {
-    return this.active;
-  }
-
-  wakeAll(): void {
-    const pending = this.waiters.splice(0, this.waiters.length);
-    for (const wake of pending) wake();
-  }
-
-  async acquire(): Promise<void> {
-    while (this.active >= this.limit()) {
-      await new Promise<void>((resolve) => { this.waiters.push(resolve); });
-    }
-    this.active++;
-  }
-
-  release(): void {
-    this.active = Math.max(0, this.active - 1);
-    const next = this.waiters.shift();
-    if (next) next();
-  }
+export interface ConcurrencyLimits {
+  physicalCores: number;
+  logicalCores: number;
+  source: string;
+  gradleBuildConcurrency: number;
+  clientConcurrency: number;
+  jobSlots: number;
+  maxConcurrency: number;
 }
 
-loadConcurrencySettingsFromDisk();
-
-let limits: ConcurrencyLimits = getEffectiveConcurrencyLimits();
-const gradleBuildSem = new Semaphore(() => limits.gradleBuildConcurrency);
-const clientSem = new Semaphore(() => limits.clientConcurrency);
-
-function syncLimits(): void {
-  limits = getEffectiveConcurrencyLimits();
-  gradleBuildSem.wakeAll();
-  clientSem.wakeAll();
+export interface ConcurrencyUserSettings {
+  gradleBuildConcurrency?: number;
+  clientConcurrency?: number;
 }
 
+interface SlotKindStatus {
+  active: number;
+  max: number;
+  waiting: number;
+}
+
+export interface SlotWaitOptions {
+  isCancelled?: () => boolean;
+  onWait?: (status: SlotKindStatus) => void;
+}
+
+interface SchedulerModule {
+  hostScheduler: {
+    withSlot<T>(kind: "gradle" | "client", op: () => Promise<T>, options?: SlotWaitOptions): Promise<T>;
+    status(): Record<"gradle" | "client", SlotKindStatus>;
+  };
+  SlotWaitCancelled: new () => Error;
+}
+
+interface HostConcurrencyModule {
+  loadConcurrencySettings(): ConcurrencyLimits;
+  getConcurrencyLimits(): ConcurrencyLimits;
+  saveConcurrencySettings(next: ConcurrencyUserSettings): ConcurrencyLimits;
+  resetConcurrencySettings(): ConcurrencyLimits;
+  getConcurrencySettingsPayload(): unknown;
+}
+
+let schedulerModule: SchedulerModule | null = null;
+let settingsModule: HostConcurrencyModule | null = null;
+let snapshot: ConcurrencyLimits = {
+  physicalCores: 1,
+  logicalCores: 1,
+  source: "loading",
+  gradleBuildConcurrency: 1,
+  clientConcurrency: 1,
+  jobSlots: 2,
+  maxConcurrency: 1,
+};
+
+const ready: Promise<void> = (async () => {
+  schedulerModule = await loadDist<SchedulerModule>(repoDist("core", "scheduler.js"));
+  settingsModule = await loadDist<HostConcurrencyModule>(repoDist("core", "host-concurrency.js"));
+  snapshot = settingsModule.loadConcurrencySettings();
+})();
+ready.catch((err) => console.warn("[dmcl] concurrency settings failed to load:", err));
+
+export function concurrencyReady(): Promise<void> {
+  return ready;
+}
+
+/** Current limits (a snapshot; refreshed whenever settings are applied). */
 export function getConcurrencyLimits(): ConcurrencyLimits {
-  return limits;
+  return snapshot;
 }
 
-export function applyConcurrencyUserSettings(user: ConcurrencyUserSettings): ConcurrencyLimits {
-  saveConcurrencyUserSettings(user);
-  syncLimits();
-  return limits;
+/** Applies new limits to work that has not started; running jobs are not cancelled. */
+export async function applyConcurrencyUserSettings(user: ConcurrencyUserSettings): Promise<ConcurrencyLimits> {
+  await ready;
+  snapshot = settingsModule!.saveConcurrencySettings(user);
+  return snapshot;
 }
 
-export function resetConcurrencyToDefaults(): ConcurrencyLimits {
-  resetConcurrencyUserSettings();
-  syncLimits();
-  return limits;
+export async function resetConcurrencyToDefaults(): Promise<ConcurrencyLimits> {
+  await ready;
+  snapshot = settingsModule!.resetConcurrencySettings();
+  return snapshot;
 }
 
-export function reloadConcurrencySettings(): ConcurrencyLimits {
-  loadConcurrencySettingsFromDisk();
-  syncLimits();
-  return limits;
+export async function getConcurrencySettingsPayload(): Promise<unknown> {
+  await ready;
+  return settingsModule!.getConcurrencySettingsPayload();
+}
+
+export function isSlotWaitCancelled(err: unknown): boolean {
+  return !!schedulerModule && err instanceof schedulerModule.SlotWaitCancelled;
 }
 
 export function getGovernorStatus(): {
   gradleBuildActive: number;
   gradleBuildMax: number;
+  gradleBuildWaiting: number;
   clientActive: number;
   clientMax: number;
+  clientWaiting: number;
   jobSlots: number;
   physicalCores: number;
 } {
+  const status = schedulerModule?.hostScheduler.status();
   return {
-    gradleBuildActive: gradleBuildSem.activeCount,
-    gradleBuildMax: limits.gradleBuildConcurrency,
-    clientActive: clientSem.activeCount,
-    clientMax: limits.clientConcurrency,
-    jobSlots: limits.jobSlots,
-    physicalCores: limits.physicalCores,
+    gradleBuildActive: status?.gradle.active ?? 0,
+    gradleBuildMax: status?.gradle.max ?? snapshot.gradleBuildConcurrency,
+    gradleBuildWaiting: status?.gradle.waiting ?? 0,
+    clientActive: status?.client.active ?? 0,
+    clientMax: status?.client.max ?? snapshot.clientConcurrency,
+    clientWaiting: status?.client.waiting ?? 0,
+    jobSlots: snapshot.jobSlots,
+    physicalCores: snapshot.physicalCores,
   };
 }
 
-export async function withGradleBuildSlot<T>(operation: () => Promise<T>): Promise<T> {
-  await gradleBuildSem.acquire();
-  try {
-    return await operation();
-  } finally {
-    gradleBuildSem.release();
-  }
+export async function withGradleBuildSlot<T>(operation: () => Promise<T>, options?: SlotWaitOptions): Promise<T> {
+  await ready;
+  return schedulerModule!.hostScheduler.withSlot("gradle", operation, options);
 }
 
-export async function withClientSlot<T>(operation: () => Promise<T>): Promise<T> {
-  await clientSem.acquire();
-  try {
-    return await operation();
-  } finally {
-    clientSem.release();
-  }
+export async function withClientSlot<T>(operation: () => Promise<T>, options?: SlotWaitOptions): Promise<T> {
+  await ready;
+  return schedulerModule!.hostScheduler.withSlot("client", operation, options);
 }

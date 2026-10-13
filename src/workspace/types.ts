@@ -1,7 +1,38 @@
 import type { LoaderId, MappingsId } from "../types.js";
 
 export type ModStatus = "active" | "paused" | "released";
-export type BuildStatus = "unknown" | "success" | "failed" | "building";
+/** Legacy single-word status (matrix, catalog export). "building" is never written to disk any more. */
+export type BuildStatus = "unknown" | "success" | "failed" | "building" | "running" | "cancelled";
+
+export type JobKind = "build" | "run";
+
+/** How the last finished job of a variant ended; stored in .dmcl/variant.json. */
+export interface VariantResult {
+  kind: JobKind;
+  state: "succeeded" | "failed" | "cancelled";
+  /** ISO time the job finished. */
+  at: string;
+  reason: string | null;
+  /** Furthest phase the job reached (see src/launch/phases.ts). */
+  phaseReached: string | null;
+  startedAt?: string;
+  durationMs?: number;
+  /** run: process start to title screen. */
+  timeToTitleMs?: number;
+  /** Major version of the JDK Gradle ran on. */
+  javaMajor?: number | null;
+  exitCode?: number | null;
+}
+
+/** What the GUI shows per variant: the active job if any, else the last result. */
+export interface VariantStatus {
+  state: "unknown" | "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  kind: JobKind | null;
+  at: string | null;
+  reason: string | null;
+  phaseReached: string | null;
+  activeJobId: string | null;
+}
 export type VariantSource = "dmcl" | "imported";
 
 export interface ModVariant {
@@ -14,6 +45,10 @@ export interface ModVariant {
   mappings: MappingsId;
   buildStatus: BuildStatus;
   lastBuiltAt?: string;
+  /** Last finished build/run (persisted). */
+  lastResult?: VariantResult;
+  /** Active job or last result, for the GUI. */
+  status?: VariantStatus;
   source: VariantSource;
   createdAt: string;
   /** 刷新时检测到项目目录不存在 */

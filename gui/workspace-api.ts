@@ -5,15 +5,25 @@ import path from "node:path";
 import { app, dialog, shell } from "electron";
 import {
   cancelBuildQueue,
+  cancelJob,
   enqueueBatch,
   enqueueBuild,
+  getJob,
+  getJobLog,
   getQueueStatus,
   isVariantQueued,
+  listJobs,
   listLogs,
   readLog,
   getVariantBuildLogContent,
-  saveVariantBuildLog,
 } from "./build-queue";
+import {
+  applyConcurrencyUserSettings,
+  getConcurrencySettingsPayload,
+  getGovernorStatus,
+  resetConcurrencyToDefaults,
+} from "./concurrency-governor";
+import { getGradleCore, getLaunchCore } from "./gradle-core-bridge";
 import {
   cancelVariantBatchJob,
   ensureBatchJobsDir,
@@ -215,6 +225,42 @@ function notFound(res: ServerResponse): void {
   json(res, { error: "Not found" }, 404);
 }
 
+/** Host activity for the GUI: Linker instance tests, builds and games, including DMCL's own entries. */
+interface HostActivityView {
+  busy: boolean;
+  jobs: Array<{
+    kind: string;
+    label: string;
+    pid: number;
+    startedAt: string;
+    progress: string | null;
+    source: "linker" | "dmcl";
+  }>;
+}
+
+let hostActivityCache: { at: number; value: HostActivityView } | null = null;
+
+export async function hostActivitySnapshot(maxAgeMs = 2000): Promise<HostActivityView> {
+  if (hostActivityCache && Date.now() - hostActivityCache.at < maxAgeMs) return hostActivityCache.value;
+  let entries: Awaited<ReturnType<Awaited<ReturnType<typeof getLaunchCore>>["listHostActivity"]>> = [];
+  try {
+    entries = await (await getLaunchCore()).listHostActivity();
+  } catch {
+    entries = [];
+  }
+  const jobs = entries.map((entry) => ({
+    kind: entry.kind,
+    label: entry.label,
+    pid: entry.pid,
+    startedAt: entry.started_at,
+    progress: entry.progress ?? null,
+    source: (entry.label.startsWith("DMCL ") ? "dmcl" : "linker") as "linker" | "dmcl",
+  }));
+  const value = { busy: jobs.length > 0, jobs };
+  hostActivityCache = { at: Date.now(), value };
+  return value;
+}
+
 export async function handleWorkspaceApi(
   req: IncomingMessage,
   res: ServerResponse,
@@ -285,9 +331,70 @@ export async function handleWorkspaceApi(
 
   // GET /api/concurrency
   if (urlPath === "/api/concurrency" && method === "GET") {
-    const { getConcurrencySettingsPayload } = await import("./concurrency-settings");
-    const { getGovernorStatus } = await import("./concurrency-governor");
-    json(res, { ...getConcurrencySettingsPayload(), ...getGovernorStatus() });
+    json(res, { ...(await getConcurrencySettingsPayload() as object), ...getGovernorStatus() });
+    return true;
+  }
+
+  // GET /api/variants — every registered variant with its status (active job or last result)
+  if (urlPath === "/api/variants" && method === "GET") {
+    store.refresh();
+    const variants = (store.getMods() as ManagedMod[]).flatMap((m) => m.variants.map((v) => ({
+      ...v,
+      modUuid: m.id,
+      modId: m.modId,
+      modName: m.displayName,
+    })));
+    json(res, { variants });
+    return true;
+  }
+
+  // GET /api/jobs — active jobs (oldest first) then recently finished ones
+  if (urlPath === "/api/jobs" && method === "GET") {
+    json(res, { jobs: listJobs(), queue: getQueueStatus() });
+    return true;
+  }
+
+  // GET /api/jobs/:id, GET /api/jobs/:id/log?from=n, POST /api/jobs/:id/cancel
+  const jobMatch = urlPath.match(/^\/api\/jobs\/([^/]+)(?:\/(log|cancel))?$/);
+  if (jobMatch) {
+    const jobId = decodeURIComponent(jobMatch[1]);
+    const action = jobMatch[2];
+    if (!action && method === "GET") {
+      const job = getJob(jobId);
+      if (!job) { json(res, { error: "任务不存在" }, 404); return true; }
+      json(res, job);
+      return true;
+    }
+    if (action === "log" && method === "GET") {
+      const q = new URL(req.url ?? urlPath, "http://localhost").searchParams;
+      const page = getJobLog(jobId, Number.parseInt(q.get("from") ?? "0", 10) || 0);
+      if (!page) { json(res, { error: "任务不存在" }, 404); return true; }
+      json(res, page);
+      return true;
+    }
+    if (action === "cancel" && method === "POST") {
+      if (!getJob(jobId)) { json(res, { error: "任务不存在" }, 404); return true; }
+      cancelJob(jobId);
+      json(res, { ok: true });
+      return true;
+    }
+  }
+
+  // GET /api/host-activity — heavy jobs on this machine (Linker instance tests, DMCL builds/games, …)
+  if (urlPath === "/api/host-activity" && method === "GET") {
+    json(res, await hostActivitySnapshot());
+    return true;
+  }
+
+  // GET /api/gradle/cache — Gradle homes in use and the size of legacy per-JVM shards (read-only)
+  if (urlPath === "/api/gradle/cache" && method === "GET") {
+    const core = await getGradleCore();
+    const shards = await core.measureLegacyGradleShards();
+    json(res, {
+      dmclHome: core.resolveGradleUserHome().path,
+      legacyShards: shards,
+      legacyBytes: shards.reduce((sum, shard) => sum + shard.bytes, 0),
+    });
     return true;
   }
 
@@ -440,8 +547,7 @@ export async function handleWorkspaceApi(
         paths,
         wantsProgress
           ? (done: number, total: number, p: string) => {
-            res.write(JSON.stringify({ type: "progress", done, total, path: p }) + "
-");
+            res.write(JSON.stringify({ type: "progress", done, total, path: p }) + "\n");
           }
           : undefined,
         { trash: (target: string) => shell.trashItem(target) },
@@ -450,8 +556,7 @@ export async function handleWorkspaceApi(
       if (blocked.length > 0) {
         const error = `有 ${blocked.length} 个项目目录未删除：${blocked.map((s) => s.reason).join("；")}`;
         if (wantsProgress) {
-          res.write(JSON.stringify({ type: "error", error, fileResult }) + "
-");
+          res.write(JSON.stringify({ type: "error", error, fileResult }) + "\n");
           res.end();
         } else {
           json(res, { error, fileResult }, 409);
@@ -464,8 +569,7 @@ export async function handleWorkspaceApi(
     mod.invalidateMatrixCache(m.modId);
     const payload = { ok, deleteFiles, fileResult, keptOnDisk: deleteFiles ? [] : paths, mods: store.getMods() };
     if (wantsProgress) {
-      res.write(JSON.stringify({ type: "done", ...payload }) + "
-");
+      res.write(JSON.stringify({ type: "done", ...payload }) + "\n");
       res.end();
     } else {
       json(res, payload);
@@ -579,7 +683,6 @@ export async function handleWorkspaceApi(
       }, log)) as WsVariant;
 
       if (body.autoBuild) {
-        store.updateVariantBuildStatus(variant.id, "building");
         enqueueBuild({
           variantId: variant.id,
           projectPath: variant.projectPath,
@@ -794,14 +897,13 @@ export async function handleWorkspaceApi(
 
   // GET /api/settings
   if (urlPath === "/api/settings" && method === "GET") {
-    const { getConcurrencySettingsPayload } = await import("./concurrency-settings");
     json(res, {
       scanDirs: store.getScanDirs(),
       excludedPaths: store.getExcludedPaths(),
       dmclDir: mod.getDmclDir(),
       projectsRoot: mod.getProjectsRoot(),
       repoRoot: mod.getRepoRoot(),
-      concurrency: getConcurrencySettingsPayload(),
+      concurrency: await getConcurrencySettingsPayload(),
     });
     return true;
   }
@@ -938,32 +1040,22 @@ export async function handleWorkspaceApi(
     return true;
   }
 
-  // POST /api/settings/concurrency
+  // POST /api/settings/concurrency — applies to work not yet started; running jobs keep going
   if (urlPath === "/api/settings/concurrency" && method === "POST") {
     const body = (await readBody(req)) as {
       reset?: boolean;
-      jobSlots?: number;
       gradleBuildConcurrency?: number;
       clientConcurrency?: number;
     };
-    const { resetRunnerPool } = await import("./gradle-runner");
-    const {
-      applyConcurrencyUserSettings,
-      resetConcurrencyToDefaults,
-    } = await import("./concurrency-governor");
-    const { getConcurrencySettingsPayload } = await import("./concurrency-settings");
-
     if (body.reset) {
-      resetConcurrencyToDefaults();
+      await resetConcurrencyToDefaults();
     } else {
-      applyConcurrencyUserSettings({
-        jobSlots: body.jobSlots,
+      await applyConcurrencyUserSettings({
         gradleBuildConcurrency: body.gradleBuildConcurrency,
         clientConcurrency: body.clientConcurrency,
       });
     }
-    resetRunnerPool();
-    json(res, { ok: true, concurrency: getConcurrencySettingsPayload() });
+    json(res, { ok: true, concurrency: await getConcurrencySettingsPayload() });
     return true;
   }
 
@@ -1021,21 +1113,21 @@ export async function handleWorkspaceApi(
     return true;
   }
 
-  // POST /api/variants/:id/build
+  // POST /api/variants/:id/build — explicit `gradlew build` (runClient: true adds a smoke launch)
   const buildMatch = urlPath.match(/^\/api\/variants\/([^/]+)\/build$/);
   if (buildMatch && method === "POST") {
     const body = (await readBody(req)) as { runClient?: boolean };
     const found = store.getVariant(buildMatch[1]);
     if (!found) { json(res, { error: "变体不存在" }, 404); return true; }
-    store.updateVariantBuildStatus(buildMatch[1], "building");
     const jobId = enqueueBuild({
       variantId: buildMatch[1],
       projectPath: found.variant.projectPath,
       type: body.runClient ? "build+run" : "build",
       loader: found.variant.loader,
       mcVersion: found.variant.mcVersion,
+      modName: found.mod.displayName,
     });
-    json(res, { jobId, queue: getQueueStatus() });
+    json(res, { jobId, job: getJob(jobId), queue: getQueueStatus() });
     return true;
   }
 
@@ -1136,20 +1228,28 @@ export async function handleWorkspaceApi(
     return true;
   }
 
-  // POST /api/variants/:id/run
+  // POST /api/variants/:id/run — launch: only the client run task, no full build.
+  // body { stopAtTitle?: boolean } closes the client at the title screen (smoke launch).
+  // hostActivity in the response lets the GUI warn when Linker instance tests or other heavy jobs run.
   const runMatch = urlPath.match(/^\/api\/variants\/([^/]+)\/run$/);
   if (runMatch && method === "POST") {
+    const body = (await readBody(req)) as { stopAtTitle?: boolean };
     const found = store.getVariant(runMatch[1]);
     if (!found) { json(res, { error: "变体不存在" }, 404); return true; }
-    store.updateVariantBuildStatus(runMatch[1], "building");
+    if (!fs.existsSync(found.variant.projectPath)) {
+      json(res, { error: "项目目录不存在，请先重新定位项目" }, 400);
+      return true;
+    }
     const jobId = enqueueBuild({
       variantId: runMatch[1],
       projectPath: found.variant.projectPath,
       type: "run",
       loader: found.variant.loader,
       mcVersion: found.variant.mcVersion,
+      stopAtTitle: body.stopAtTitle === true,
+      modName: found.mod.displayName,
     });
-    json(res, { jobId, queue: getQueueStatus() });
+    json(res, { jobId, job: getJob(jobId), hostActivity: await hostActivitySnapshot(), queue: getQueueStatus() });
     return true;
   }
 
@@ -1228,8 +1328,6 @@ export async function handleWorkspaceApi(
       return true;
     }
 
-    for (const v of buildable) store.updateVariantBuildStatus(v.id, "building");
-
     const jobType = body.runClient ? "build+run" as const : "build" as const;
     const ids = enqueueBatch(buildable.map((v) => ({
       variantId: v.id,
@@ -1237,6 +1335,7 @@ export async function handleWorkspaceApi(
       type: jobType,
       loader: v.loader,
       mcVersion: v.mcVersion,
+      modName: m.displayName,
     })));
 
     json(res, {
@@ -1530,7 +1629,9 @@ export async function initWorkspace(repoRoot: string, writableProjectsRoot?: str
     store.addScanDir(projectsRoot);
   }
   mod.reconcileWorkspace(store);
-  const projectRoot = path.resolve(__dirname, "..");
+  // Nothing can be running at start-up: clear "building"/"running" left by a crash or an older DMCL.
+  const interrupted = store.resetInterruptedStatuses();
+  if (interrupted > 0) console.log(`[dmcl] ${interrupted} 个变体的中断任务已标记为已取消`);
   loadDist(repoDist("meta", "meta-cache.js"))
     .then(({ getMetaCache }) => {
       const cache = getMetaCache();
