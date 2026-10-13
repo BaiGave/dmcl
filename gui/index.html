@@ -1,10 +1,10 @@
-
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>DMCL · Mod Dev Workbench</title>
+<meta name="color-scheme" content="light dark">
+<title>DMCL</title>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body class="intro-pending">
@@ -13,7 +13,7 @@
     <div class="logo-block">
       <div>
         <h1>DMCL</h1>
-        <p>Mod Dev Launcher</p>
+        <p>模组开发启动器</p>
       </div>
     </div>
     <button class="nav-btn active" data-view="list" title="模组工作台">
@@ -42,10 +42,11 @@
 
   <main class="main">
     <div class="topbar">
+      <div class="topbar-status" id="topbar-status"></div>
       <div class="stat-strip" aria-label="工作台状态摘要">
         <div class="stat-pill"><span class="label">模组</span><span class="value" id="stat-mods">0</span></div>
         <div class="stat-pill"><span class="label">变体</span><span class="value" id="stat-variants">0</span></div>
-        <div class="stat-pill"><span class="label">构建健康</span><span class="value" id="stat-build-health">0/0</span></div>
+        <div class="stat-pill"><span class="label">就绪</span><span class="value" id="stat-build-health">0/0</span></div>
         <div class="stat-pill"><span class="label">加载器</span><span class="value" id="stat-loaders">-</span></div>
       </div>
     </div>
@@ -72,7 +73,7 @@
               <button class="menu-danger" id="btn-purge">清理失效登记</button>
             </div>
           </details>
-          <button class="btn btn-primary btn-sm" id="btn-new-mod" title="新建模组">＋ 新建模组</button>
+          <button class="btn btn-primary btn-sm" id="btn-new-mod" title="新建模组"><span data-icon="plus"></span>新建模组</button>
         </div>
       </div>
       <div class="control-row">
@@ -119,6 +120,7 @@
         <div class="legend" aria-label="矩阵状态图例">
           <span id="matrix-version-count"></span>
           <span><i class="legend-dot built"></i>已构建</span>
+          <span><i class="legend-dot building"></i>进行中</span>
           <span><i class="legend-dot exists"></i>已存在</span>
           <span><i class="legend-dot available"></i>可创建</span>
           <span><i class="legend-dot failed"></i>失败</span>
@@ -134,7 +136,7 @@
         <div class="matrix-wrap" id="matrix-wrap"></div>
         <span class="matrix-fade matrix-fade-left"></span><span class="matrix-fade matrix-fade-right"></span>
       </div>
-      <div class="section-title"><h3>已有变体</h3></div>
+      <div class="section-title"><h3>变体</h3><span class="section-hint">点「启动」直接运行游戏客户端，任何版本随时可启动</span></div>
       <div class="variant-list" id="variant-list"></div>
     </div>
     <div class="view" id="view-create">
@@ -217,12 +219,12 @@
     </div>
     <div class="view" id="view-adapt">
       <div class="adapt-type-tabs" aria-label="项目类型">
-        <button class="active" type="button">Mods</button>
-        <button type="button" disabled>Resource Packs</button>
-        <button type="button" disabled>Data Packs</button>
-        <button type="button" disabled>Shaders</button>
-        <button type="button" disabled>Modpacks</button>
-        <button type="button" disabled>Plugins</button>
+        <button class="active" type="button">模组</button>
+        <button type="button" disabled>资源包</button>
+        <button type="button" disabled>数据包</button>
+        <button type="button" disabled>光影</button>
+        <button type="button" disabled>整合包</button>
+        <button type="button" disabled>插件</button>
       </div>
       <div class="page-header">
         <div>
@@ -241,20 +243,20 @@
           <input id="adapt-loader" type="hidden">
           <input id="adapt-category" type="hidden">
           <div class="adapt-filter-card">
-            <div class="adapt-filter-head"><strong>Game version</strong><button type="button" data-adapt-clear="mc">All</button></div>
+            <div class="adapt-filter-head"><strong>游戏版本</strong><button type="button" data-adapt-clear="mc">全部</button></div>
             <label class="search-field adapt-mini-search">
               <span data-icon="search"></span>
-              <input class="search-input" id="adapt-mc" placeholder="Search or type version">
+              <input class="search-input" id="adapt-mc" placeholder="搜索或输入版本">
             </label>
             <div class="adapt-filter-list" id="adapt-version-list"></div>
-            <label class="checkbox-row adapt-show-more"><input type="checkbox" id="adapt-show-all-versions"> Show all versions</label>
+            <label class="checkbox-row adapt-show-more"><input type="checkbox" id="adapt-show-all-versions"> 显示全部版本</label>
           </div>
           <div class="adapt-filter-card">
-            <div class="adapt-filter-head"><strong>Loader</strong><button type="button" data-adapt-clear="loader">All</button></div>
+            <div class="adapt-filter-head"><strong>加载器</strong><button type="button" data-adapt-clear="loader">全部</button></div>
             <div class="adapt-filter-list" id="adapt-loader-list"></div>
           </div>
           <div class="adapt-filter-card">
-            <div class="adapt-filter-head"><strong>Category</strong><button type="button" data-adapt-clear="category">All</button></div>
+            <div class="adapt-filter-head"><strong>分类</strong><button type="button" data-adapt-clear="category">全部</button></div>
             <div class="adapt-filter-list adapt-category-list" id="adapt-category-list"></div>
           </div>
           <div class="adapt-warning" id="adapt-warning" hidden></div>
@@ -262,13 +264,13 @@
         <section class="adapt-results-panel">
           <label class="search-field adapt-search-field">
             <span data-icon="search"></span>
-            <input class="search-input" id="adapt-query" placeholder="Search mods...">
+            <input class="search-input" id="adapt-query" placeholder="搜索模组…">
           </label>
           <div class="adapt-result-tools">
-            <label>Source <select id="adapt-source"><option value="all">All</option><option value="modrinth">Modrinth</option><option value="curseforge">CurseForge</option></select></label>
-            <label>Sort by <select id="adapt-sort"><option value="downloads">Downloads</option><option value="relevance">Relevance</option><option value="follows">Follows</option><option value="newest">Newest</option><option value="updated">Updated</option></select></label>
-            <label>View <select id="adapt-limit"><option value="20">20</option><option value="40">40</option><option value="60">60</option></select></label>
-            <button class="btn btn-primary btn-sm" id="btn-adapt-search" type="button">Search</button>
+            <label>来源 <select id="adapt-source"><option value="all">全部</option><option value="modrinth">Modrinth</option><option value="curseforge">CurseForge</option></select></label>
+            <label>排序 <select id="adapt-sort"><option value="downloads">下载量</option><option value="relevance">相关度</option><option value="follows">关注数</option><option value="newest">最新发布</option><option value="updated">最近更新</option></select></label>
+            <label>每页 <select id="adapt-limit"><option value="20">20</option><option value="40">40</option><option value="60">60</option></select></label>
+            <button class="btn btn-primary btn-sm" id="btn-adapt-search" type="button">搜索</button>
           </div>
           <div class="section-title"><h3>搜索结果</h3><span class="muted-placeholder" id="adapt-count">正在加载默认列表</span></div>
           <div class="adapt-results" id="adapt-results"></div>
@@ -370,7 +372,8 @@
   <span class="spinner"></span>
   <div class="queue-copy"><strong id="queue-text">构建队列运行中…</strong><span id="queue-subtext">任务准备中</span></div>
   <div class="queue-progress" aria-hidden="true"><span></span></div>
-  <button class="btn btn-secondary btn-sm" id="queue-cancel">取消队列</button>
+  <button class="btn btn-secondary btn-sm" id="queue-open" hidden>查看进度</button>
+  <button class="btn btn-ghost btn-sm" id="queue-cancel">取消队列</button>
 </div>
 <div class="modal-overlay" id="modal-overlay" role="presentation">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1">
