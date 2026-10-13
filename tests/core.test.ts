@@ -840,6 +840,123 @@ describe("project toolchain resolver", () => {
     assert.match(logs.join("\n"), /外部导入/);
     fs.rmSync(dir, { recursive: true, force: true });
   });
+
+  it("skips Gradle auto-upgrade for imported projects inside the workspace", async () => {
+    const { ensureGradleWrapperCompatibility, resolveProjectToolchain } = await import("../src/core/toolchain.js");
+    const { readGradleVersion } = await import("../src/core/jdk.js");
+    const { getProjectsRoot, setProjectsRoot } = await import("../src/workspace/paths.js");
+    const previousRoot = getProjectsRoot();
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dmcl-projects-root-"));
+    const dir = path.join(root, "linker", "apps", "minecraft", "fabric-1.17.1");
+    try {
+      setProjectsRoot(root);
+      fs.mkdirSync(path.join(dir, ".dmcl"), { recursive: true });
+      writeGradleProject(dir, "7.2", "1.17.1", false);
+      fs.writeFileSync(path.join(dir, ".dmcl", "toolchain.json"), "{}\n", "utf8");
+      const profile = resolveProjectToolchain(dir)!;
+      assert.equal(await ensureGradleWrapperCompatibility(dir, profile, () => {}), false);
+      assert.equal(readGradleVersion(dir), "7.2");
+    } finally {
+      setProjectsRoot(previousRoot);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("passes the chosen JDK to an imported project's Gradle without touching gradle.properties", async (t) => {
+    const { findCachedJdk, readJavaHomeFromProject, resolveBuildJdk } = await import("../src/core/jdk.js");
+    const { buildGradleEnv, getIsolatedGradleHome } = await import("../src/core/gradle.js");
+    const { ensureProjectToolchain } = await import("../src/core/toolchain.js");
+    const jdk17 = findCachedJdk(17);
+    if (!jdk17) {
+      t.skip("DMCL has no cached JDK 17");
+      return;
+    }
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dmcl-imported-jdk-"));
+    try {
+      writeGradleProject(dir, "8.1.1", "1.20.1", false);
+      const props = path.join(dir, "gradle.properties");
+      const before = fs.readFileSync(props);
+
+      await ensureProjectToolchain(dir, "1.20.1");
+      assert.deepEqual(fs.readFileSync(props), before);
+      const meta = JSON.parse(fs.readFileSync(path.join(dir, ".dmcl", "toolchain.json"), "utf8"));
+      assert.equal(meta.javaHome, jdk17);
+      assert.equal(readJavaHomeFromProject(dir), jdk17);
+      assert.equal(buildGradleEnv(dir).JAVA_HOME, jdk17);
+      assert.match(getIsolatedGradleHome(dir), /jvm-17$/);
+      const build = await resolveBuildJdk(dir, "1.20.1");
+      assert.deepEqual([build.javaHome, build.origin], [jdk17, "dmcl"]);
+
+      // A second run reuses the record and still leaves the project file alone
+      await ensureProjectToolchain(dir, "1.20.1");
+      assert.deepEqual(fs.readFileSync(props), before);
+
+      // The project's own setting wins for every reader
+      const own = path.join(dir, "own-jdk");
+      fs.appendFileSync(props, `org.gradle.java.home=${own.replace(/\\/g, "/")}\n`);
+      assert.equal(path.resolve(readJavaHomeFromProject(dir)!), own);
+      assert.equal(path.resolve(buildGradleEnv(dir).JAVA_HOME!), own);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to rewrite an imported project's unusable org.gradle.java.home", async () => {
+    const { ensureProjectToolchain } = await import("../src/core/toolchain.js");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dmcl-imported-own-jdk-"));
+    try {
+      writeGradleProject(dir, "8.1.1", "1.20.1", false);
+      const props = path.join(dir, "gradle.properties");
+      fs.appendFileSync(props, `org.gradle.java.home=${path.join(dir, "missing-jdk").replace(/\\/g, "/")}\n`);
+      const before = fs.readFileSync(props);
+
+      await assert.rejects(ensureProjectToolchain(dir, "1.20.1"), /DMCL 不改写导入项目的 gradle\.properties/);
+      assert.deepEqual(fs.readFileSync(props), before);
+      assert.equal(fs.existsSync(path.join(dir, ".dmcl", "toolchain.json")), false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores a recorded JDK that no longer exists", async () => {
+    const { readJavaHomeFromProject } = await import("../src/core/jdk.js");
+    const { buildGradleEnv } = await import("../src/core/gradle.js");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dmcl-stale-jdk-"));
+    try {
+      writeGradleProject(dir, "8.1.1", "1.20.1", false);
+      fs.mkdirSync(path.join(dir, ".dmcl"));
+      fs.writeFileSync(
+        path.join(dir, ".dmcl", "toolchain.json"),
+        JSON.stringify({ javaHome: path.join(dir, "deleted-jdk") }),
+        "utf8",
+      );
+      assert.equal(readJavaHomeFromProject(dir), null);
+      assert.equal(buildGradleEnv(dir).JAVA_HOME, process.env.JAVA_HOME);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps writing org.gradle.java.home for DMCL scaffolded projects", async (t) => {
+    const { findCachedJdk, readJavaHomeFromProject } = await import("../src/core/jdk.js");
+    const { ensureProjectToolchain, writeScaffoldMarker } = await import("../src/core/toolchain.js");
+    const jdk17 = findCachedJdk(17);
+    if (!jdk17) {
+      t.skip("DMCL has no cached JDK 17");
+      return;
+    }
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dmcl-scaffold-jdk-"));
+    try {
+      writeGradleProject(dir, "8.1.1", "1.20.1", false);
+      await writeScaffoldMarker(dir, "fabric", "1.20.1");
+      await ensureProjectToolchain(dir, "1.20.1");
+      const written = /^org\.gradle\.java\.home=(.+)$/m.exec(fs.readFileSync(path.join(dir, "gradle.properties"), "utf8"));
+      assert.equal(path.resolve(written?.[1] ?? ""), jdk17);
+      assert.equal(path.resolve(readJavaHomeFromProject(dir)!), jdk17);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("Forge Mavenizer auxiliary JDK detection", () => {

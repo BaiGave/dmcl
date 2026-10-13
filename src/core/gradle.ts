@@ -2,7 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { ensureDmclHome, getDmclHome } from "./dmcl-home.js";
-import { detectJavaMajorAt } from "./jdk.js";
+import { detectJavaMajorAt, readJavaHomeFromProject } from "./jdk.js";
+
+export { readJavaHomeFromProject } from "./jdk.js";
 
 export const CLIENT_SUCCESS = [
   /Sound engine started/i,
@@ -172,20 +174,6 @@ export interface GradleClientOptions extends GradleRunOptions {
   mode: "verify" | "interactive";
 }
 
-/** 读取项目 gradle.properties 中的 org.gradle.java.home */
-export function readJavaHomeFromProject(targetDir: string): string | null {
-  try {
-    const propsFile = path.join(targetDir, "gradle.properties");
-    if (!fs.existsSync(propsFile)) return null;
-    const content = fs.readFileSync(propsFile, "utf8");
-    const m = content.match(/^[ \t]*org\.gradle\.java\.home[ \t]*=[ \t]*(.+)$/m);
-    if (!m) return null;
-    return m[1].trim().replace(/\\\\/g, "\\").replace(/\\:/g, ":");
-  } catch {
-    return null;
-  }
-}
-
 /** 独立 Gradle 用户目录，避免用户全局 init.d 脚本破坏旧版 Gradle。 */
 export function getIsolatedGradleHome(targetDir?: string): string {
   const base = path.join(getDmclHome(), "cache", "gradle");
@@ -216,6 +204,7 @@ export function javaHomeEnvOverrides(
   };
 }
 
+/** 项目 Gradle 进程的环境：项目 JDK 经 JAVA_HOME 传入，不需要写进项目的 gradle.properties */
 export function buildGradleEnv(targetDir: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   env.GRADLE_USER_HOME = getIsolatedGradleHome(targetDir);

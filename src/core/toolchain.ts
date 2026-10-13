@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { LoaderId } from "../types.js";
-import { getProjectsRoot } from "../workspace/paths.js";
 import { detectProjectLoader } from "../workspace/loader-detect.js";
 import { applyChinaMirror } from "./mirror.js";
 import {
@@ -11,7 +10,6 @@ import {
   gradleJvmRange,
   pickJdkMajor,
   readGradleVersion,
-  readJavaHomeFromProject,
   readLoomVersion,
   readMcVersionFromProject,
   requiredJavaFor,
@@ -21,6 +19,7 @@ import {
   type JdkLogger,
   type JdkOptions,
 } from "./jdk.js";
+import { saveToolchainMetadata } from "./toolchain-metadata.js";
 import { ensureForgeMavenizerJdkCache, usesForgeGradle } from "./forge-mavenizer.js";
 import { minimumGradleForJvm } from "./version-toolchain.js";
 
@@ -45,16 +44,6 @@ export interface ProjectToolchain {
   gradleUpgradeRecommended?: string;
 }
 
-export interface ToolchainMetadata {
-  mcVersion: string;
-  loader: LoaderId | null;
-  gradleVersion: string | null;
-  jdkMajor: number;
-  compileJavaMajor: number;
-  loomVersion: string | null;
-  configuredAt: string;
-}
-
 export interface ScaffoldMarker {
   loader: LoaderId;
   mcVersion: string;
@@ -62,18 +51,12 @@ export interface ScaffoldMarker {
   dmclVersion: string;
 }
 
-/** 项目由 DMCL 脚手架生成；导入项目写过工具链元数据也不算 */
+/**
+ * 项目由 DMCL 脚手架生成，DMCL 才可改写其 gradle.properties 与 Gradle Wrapper。
+ * 导入项目即使位于工作区 projects 目录或写过 .dmcl 工具链记录也不算。
+ */
 export function hasScaffoldMarker(targetDir: string): boolean {
   return fs.existsSync(path.join(path.resolve(targetDir), ".dmcl", "scaffold.json"));
-}
-
-/** DMCL 脚手架或工作区项目才允许自动改 Gradle Wrapper */
-export function isDmclManagedProject(targetDir: string): boolean {
-  const resolved = path.resolve(targetDir);
-  if (hasScaffoldMarker(resolved)) return true;
-  if (fs.existsSync(path.join(resolved, ".dmcl", "toolchain.json"))) return true;
-  const projectsRoot = path.resolve(getProjectsRoot());
-  return resolved === projectsRoot || resolved.startsWith(projectsRoot + path.sep);
 }
 
 export async function writeScaffoldMarker(
@@ -164,7 +147,7 @@ export function resolveProjectToolchain(
   };
 }
 
-/** 当 Wrapper 过旧时自动升级 distributionUrl（仅 DMCL 托管项目） */
+/** 当 Wrapper 过旧时自动升级 distributionUrl（仅 DMCL 脚手架项目） */
 export async function ensureGradleWrapperCompatibility(
   targetDir: string,
   toolchain: ProjectToolchain,
@@ -176,7 +159,7 @@ export async function ensureGradleWrapperCompatibility(
     log("⚠ 旧版 ForgeGradle 项目跳过 Gradle Wrapper 自动升级");
     return false;
   }
-  if (!isDmclManagedProject(targetDir)) {
+  if (!hasScaffoldMarker(targetDir)) {
     log("⚠ 外部导入项目跳过 Gradle Wrapper 自动升级，请手动调整 gradle-wrapper.properties");
     return false;
   }
@@ -208,32 +191,22 @@ export async function ensureGradleWrapperCompatibility(
   return true;
 }
 
-function toolchainMetadataPath(targetDir: string): string {
-  return path.join(targetDir, ".dmcl", "toolchain.json");
-}
-
+/** 记录工具链与选定 JDK；导入项目之后的 Gradle 调用由此经 JAVA_HOME 取得 JDK */
 export async function writeToolchainMetadata(
   targetDir: string,
   toolchain: ProjectToolchain,
+  javaHome: string,
 ): Promise<void> {
-  const configuredHome = readJavaHomeFromProject(targetDir);
-  const configuredMajor = configuredHome ? detectJavaMajorAt(configuredHome) : null;
-  const meta: ToolchainMetadata = {
+  await saveToolchainMetadata(targetDir, {
     mcVersion: toolchain.mcVersion,
     loader: toolchain.loader,
     gradleVersion: readGradleVersion(targetDir),
-    jdkMajor: configuredMajor ?? toolchain.gradleRuntimeJdkMajor,
+    jdkMajor: detectJavaMajorAt(javaHome) ?? toolchain.gradleRuntimeJdkMajor,
+    javaHome,
     compileJavaMajor: toolchain.compileJavaMajor,
     loomVersion: toolchain.loomVersion,
     configuredAt: new Date().toISOString(),
-  };
-  const dir = path.dirname(toolchainMetadataPath(targetDir));
-  await fs.promises.mkdir(dir, { recursive: true });
-  await fs.promises.writeFile(
-    toolchainMetadataPath(targetDir),
-    `${JSON.stringify(meta, null, 2)}\n`,
-    "utf8",
-  );
+  });
 }
 
 /**
@@ -256,7 +229,8 @@ export async function resolveProjectGradleJdk(
 }
 
 /**
- * 全自动配置项目工具链：Gradle Wrapper 兼容 → JDK → Forge Mavenizer 缓存 → 元数据。
+ * 全自动配置项目工具链：Gradle Wrapper 兼容 → JDK → 元数据 → Forge Mavenizer 缓存。
+ * 只有 DMCL 脚手架项目会写 gradle.properties；导入项目的 JDK 记在 .dmcl/toolchain.json。
  */
 export async function ensureProjectToolchain(
   targetDir: string,
@@ -283,13 +257,18 @@ export async function ensureProjectToolchain(
     throw new Error(toolchain.incompatibleReason);
   }
 
-  await ensureProjectJdk(targetDir, toolchain.mcVersion, log, options);
+  const scaffolded = hasScaffoldMarker(targetDir);
+  const javaHome = await ensureProjectJdk(targetDir, toolchain.mcVersion, log, {
+    ...options,
+    writeGradleProperties: scaffolded,
+  });
+  // Mavenizer 缓存按项目 JDK 分片，需先记录选择
+  await writeToolchainMetadata(targetDir, toolchain, javaHome);
+  if (!scaffolded) log("导入项目不改 gradle.properties，启动 Gradle 时经 JAVA_HOME 传入所选 JDK");
 
   if (toolchain.needsForgeMavenizer) {
     await ensureForgeMavenizerJdkCache(targetDir, log, options);
   }
 
-  toolchain = resolveProjectToolchain(targetDir, toolchain.mcVersion)!;
-  await writeToolchainMetadata(targetDir, toolchain);
   log("✔ 项目工具链已就绪");
 }

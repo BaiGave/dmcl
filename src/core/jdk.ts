@@ -5,6 +5,7 @@ import path from "node:path";
 import AdmZip from "adm-zip";
 import { readBuildScripts, resolveGradleValue } from "./build-script.js";
 import { fetchJson, UA } from "./http.js";
+import { readToolchainMetadata } from "./toolchain-metadata.js";
 
 export type JdkLogger = (msg: string) => void;
 
@@ -93,8 +94,8 @@ export function detectJavaMajorAt(javaHome: string): number | null {
   }
 }
 
-/** 读取项目 gradle.properties 中的 org.gradle.java.home */
-export function readJavaHomeFromProject(targetDir: string): string | null {
+/** 项目 gradle.properties 自己配置的 org.gradle.java.home */
+function readGradlePropertiesJavaHome(targetDir: string): string | null {
   try {
     const propsFile = path.join(targetDir, "gradle.properties");
     if (!fs.existsSync(propsFile)) return null;
@@ -105,6 +106,22 @@ export function readJavaHomeFromProject(targetDir: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** DMCL 在 .dmcl/toolchain.json 记录的 JDK；目录中已没有 java 时视为未记录 */
+function readRecordedJavaHome(targetDir: string): string | null {
+  const javaHome = readToolchainMetadata(targetDir)?.javaHome;
+  if (typeof javaHome !== "string" || !javaHome) return null;
+  return fs.existsSync(javaBinary(javaHome)) ? javaHome : null;
+}
+
+/**
+ * Gradle 在此项目使用的 JDK，构建、启动、缓存分片和反编译都以此为准：
+ * 项目 gradle.properties 的 org.gradle.java.home 优先（Gradle 自身也以它为准），
+ * 其次是 DMCL 记录的选择，由 buildGradleEnv 经 JAVA_HOME 传给 Gradle。
+ */
+export function readJavaHomeFromProject(targetDir: string): string | null {
+  return readGradlePropertiesJavaHome(targetDir) ?? readRecordedJavaHome(targetDir);
 }
 
 /** Gradle 实际会使用的 JVM 主版本（优先项目配置，其次 JAVA_HOME，最后 PATH） */
@@ -255,18 +272,6 @@ export function isJvmCompatible(targetDir: string): boolean {
   return true;
 }
 
-export async function downloadAndInjectJdk(
-  javaMajor: number,
-  targetDir: string,
-  log: JdkLogger,
-  options?: JdkOptions,
-): Promise<void> {
-  const jdkPath = await ensureJdkInCache(javaMajor, log, options);
-  throwIfCancelled(options);
-  await injectJdkHome(targetDir, jdkPath);
-  log("已配置 org.gradle.java.home");
-}
-
 /**
  * 分析项目构建所需的 JDK 主版本及原因（不检测系统 Java）。
  */
@@ -296,7 +301,7 @@ export function resolveProjectJdkNeed(
   return { major, gradleVersion, loomVersion, summary, incompatibleReason };
 }
 
-/** 项目 gradle.properties 是否已指向可用且在兼容范围内的 JDK */
+/** 项目当前的 JDK（见 readJavaHomeFromProject）是否可用且在兼容范围内 */
 export function projectJdkIsReady(
   targetDir: string,
   neededMajor: number,
@@ -320,16 +325,22 @@ export function projectJdkIsReady(
   }
   return true;
 }
+
+export interface ProjectJdkOptions extends JdkOptions {
+  /** 把选定 JDK 写入项目 gradle.properties，仅用于 DMCL 脚手架项目；其他项目由调用方记录并在启动 Gradle 时传入 */
+  writeGradleProperties?: boolean;
+}
+
 /**
- * 确保项目使用 DMCL 托管的 JDK：先分析需求，再查本地缓存，缺失则自动下载。
- * 不依赖用户系统是否已安装 Java。
+ * 确保项目有可用的 DMCL 托管 JDK 并返回其目录：先分析需求，再查本地缓存，缺失则自动下载。
+ * 不依赖用户系统是否已安装 Java；导入项目自己配置的 org.gradle.java.home 不可用时报错，不改写。
  */
 export async function ensureProjectJdk(
   targetDir: string,
   mcVersion: string,
   log: JdkLogger = () => {},
-  options?: JdkOptions,
-): Promise<void> {
+  options?: ProjectJdkOptions,
+): Promise<string> {
   throwIfCancelled(options);
   const need = resolveProjectJdkNeed(targetDir, mcVersion);
   log(`检查 JDK：此项目需要 Java ${need.major}（${need.summary}）`);
@@ -338,27 +349,36 @@ export async function ensureProjectJdk(
     throw new Error(need.incompatibleReason);
   }
 
-  if (projectJdkIsReady(targetDir, need.major, mcVersion)) {
-    const home = readJavaHomeFromProject(targetDir)!;
-    const configuredMajor = detectJavaMajorAt(home);
-    log(`✔ 项目已配置 JDK ${configuredMajor ?? need.major}：${home}`);
-    return;
+  const own = readGradlePropertiesJavaHome(targetDir);
+  // 脚手架项目以 gradle.properties 为准，缺失时补写；导入项目也沿用 DMCL 已记录的 JDK
+  const current = options?.writeGradleProperties ? own : readJavaHomeFromProject(targetDir);
+  if (current && projectJdkIsReady(targetDir, need.major, mcVersion)) {
+    const configuredMajor = detectJavaMajorAt(current);
+    log(`✔ 项目已配置 JDK ${configuredMajor ?? need.major}：${current}`);
+    return current;
   }
 
-  const cached = findCachedJdk(need.major);
-  if (cached) {
-    log(`使用 DMCL 已缓存的 JDK ${need.major}：${cached}`);
-    await injectJdkHome(targetDir, cached);
+  if (own && !options?.writeGradleProperties) {
+    throw new Error(
+      `项目 gradle.properties 配置的 org.gradle.java.home 不满足 Java ${need.major}（${need.summary}）：${own}；`
+      + "DMCL 不改写导入项目的 gradle.properties，请调整或删除这一行，DMCL 会在启动 Gradle 时传入所选 JDK",
+    );
+  }
+
+  let jdkPath = findCachedJdk(need.major);
+  if (jdkPath) {
+    log(`使用 DMCL 已缓存的 JDK ${need.major}：${jdkPath}`);
+  } else {
+    throwIfCancelled(options);
+    log(`未检测到 JDK ${need.major}，开始自动下载（无需事先安装 Java）…`);
+    jdkPath = await ensureJdkInCache(need.major, log, options);
+    throwIfCancelled(options);
+  }
+  if (options?.writeGradleProperties) {
+    await injectJdkHome(targetDir, jdkPath);
     log("已写入 org.gradle.java.home");
-    return;
   }
-
-  throwIfCancelled(options);
-  log(`未检测到 JDK ${need.major}，开始自动下载（无需事先安装 Java）…`);
-  const jdkPath = await ensureJdkInCache(need.major, log, options);
-  throwIfCancelled(options);
-  await injectJdkHome(targetDir, jdkPath);
-  log("已写入 org.gradle.java.home");
+  return jdkPath;
 }
 
 export interface BuildJdkOptions extends JdkOptions {
@@ -380,9 +400,10 @@ function javaBinary(javaHome: string): string {
 }
 
 /**
- * 为一次 Gradle 调用选择 JDK，只返回路径，不写入项目文件（与会写 gradle.properties 的 ensureProjectJdk 相对）。
+ * 为一次 Gradle 调用选择 JDK，只返回路径，不写入项目文件，也不记录选择。
  * 项目 gradle.properties 已配置 org.gradle.java.home 时原样沿用，不满足构建需求就报错而不是覆盖；
- * 否则取调用方指定的 JDK，再取 DMCL 缓存或自动下载的、满足 Gradle/Loom/Minecraft 需求的 JDK。
+ * 否则沿用 DMCL 记录且仍满足需求的 JDK，再取调用方指定的 JDK，最后取 DMCL 缓存或自动下载的、
+ * 满足 Gradle/Loom/Minecraft 需求的 JDK。
  */
 export async function resolveBuildJdk(
   targetDir: string,
@@ -409,11 +430,21 @@ export async function resolveBuildJdk(
     return { javaHome, major, origin };
   };
 
-  const configured = readJavaHomeFromProject(targetDir);
+  const configured = readGradlePropertiesJavaHome(targetDir);
   if (configured) {
     const chosen = accept(configured, "project", "项目 gradle.properties 配置的 org.gradle.java.home ");
     log(`沿用项目配置的 JDK ${chosen.major ?? "?"}：${configured}`);
     return chosen;
+  }
+  const recorded = readRecordedJavaHome(targetDir);
+  if (recorded) {
+    try {
+      const chosen = accept(recorded, "dmcl", "DMCL 为此项目记录的 JDK ");
+      log(`沿用 DMCL 为此项目选定的 JDK ${chosen.major ?? "?"}：${recorded}`);
+      return chosen;
+    } catch (err) {
+      log(`${(err as Error).message}；改为重新选择`);
+    }
   }
   if (options.javaHome) {
     const chosen = accept(path.resolve(options.javaHome), "requested", "指定的 JDK ");
