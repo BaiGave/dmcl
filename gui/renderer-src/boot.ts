@@ -1346,8 +1346,10 @@ export function bootWorkbench(): void {
         var slotInfo = " · 任务 " + active + "/" + jobSlots
           + " · 构建 " + gradleActive + "/" + gradleMax
           + " · 客户端 " + clientActive + "/" + clientMax;
+        // A launch occupies a client slot (runClient), a build a Gradle slot.
+        var verb = clientActive > 0 ? (gradleActive > 0 ? "正在构建并运行" : "正在运行") : "正在构建";
         $("queue-text").textContent = data.running || active > 0
-          ? "正在构建" + detail + slotInfo + (pending > 0 ? " · 剩余 " + pending + " 项" : "")
+          ? verb + detail + slotInfo + (pending > 0 ? " · 剩余 " + pending + " 项" : "")
           : "队列等待中 " + pending + " 项";
         setText(
           "queue-subtext",
