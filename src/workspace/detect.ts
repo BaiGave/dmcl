@@ -4,16 +4,9 @@ import type { LoaderId, MappingsId } from "../types.js";
 import type { DetectedProject } from "./types.js";
 import { getProjectsRoot } from "./paths.js";
 import { detectProjectLoader } from "./loader-detect.js";
+import { readPropertiesFile } from "../core/properties.js";
 
-function readProps(file: string): Record<string, string> {
-  if (!fs.existsSync(file)) return {};
-  const out: Record<string, string> = {};
-  for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
-    const m = line.match(/^\s*([^#=\s]+)\s*=\s*(.*)$/);
-    if (m) out[m[1]] = m[2].trim();
-  }
-  return out;
-}
+const readProps = readPropertiesFile;
 
 function isModProject(dir: string): boolean {
   const gradlew = process.platform === "win32"

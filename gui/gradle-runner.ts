@@ -1,166 +1,150 @@
-import type { ChildProcess } from "node:child_process";
-import { getConcurrencyLimits, withClientSlot, withGradleBuildSlot } from "./concurrency-governor";
-import { getGradleCore, getProjectJdk } from "./gradle-core-bridge";
-import { killProcessTree } from "./gradle";
+import { withClientSlot, withGradleBuildSlot, getConcurrencyLimits } from "./concurrency-governor";
+import { getGradleCore, getLaunchCore, getProjectJdk, getJdkCore } from "./gradle-core-bridge";
 
-export interface GradleRunner {
-  runBuildOnly(targetDir: string, log: (line: string) => void): Promise<number>;
-  runClientOnly(targetDir: string, log: (line: string) => void): Promise<number>;
-  runClientInteractive(targetDir: string, log: (line: string) => void): Promise<number>;
-  cancel(): Promise<void>;
-  reset(): void;
+/**
+ * Runs one step of a job (build, launch, client check) for the build queue and the new-project wizard.
+ * Each step waits for its slot in the process scheduler (Gradle builds / game clients), prepares the
+ * JDK, then runs Gradle through the core session (phases, host activity registry, cancellation).
+ */
+
+export type JobPhase = "queued" | "toolchain" | "configure" | "compile" | "assets" | "starting" | "in-game" | "exited";
+
+export interface StepContext {
+  log(line: string): void;
+  phase(phase: JobPhase, detail?: string): void;
   isCancelled(): boolean;
 }
 
-export function getBuildConcurrency(): number {
-  return getConcurrencyLimits().jobSlots;
+export interface StepResult {
+  status: "success" | "failed" | "cancelled";
+  reason?: string;
+  phaseReached?: JobPhase;
+  exitCode?: number | null;
+  timeToTitleMs?: number;
+  javaMajor?: number | null;
 }
 
-export function getBuildConcurrencyInfo() {
-  return getConcurrencyLimits();
+export interface LaunchOptions {
+  /** Stop the client a moment after the title screen and count that as success (smoke launch). */
+  stopAtTitle?: boolean;
+  /** Label in the host activity registry. */
+  label: string;
 }
 
-let runnerPool: GradleRunner[] | null = null;
+export interface GradleRunner {
+  /** Explicit build: `gradlew build`. */
+  build(targetDir: string, ctx: StepContext, label: string): Promise<StepResult>;
+  /** Launch: only the client run task (`gradlew runClient`), which compiles what it needs. */
+  launch(targetDir: string, ctx: StepContext, options: LaunchOptions): Promise<StepResult>;
+}
 
-export function resetRunnerPool(): void {
-  const previous = runnerPool;
-  runnerPool = null;
-  if (previous) {
-    void Promise.all(previous.map((runner) => runner.cancel()));
+/** Interactive play has no time limit; a smoke launch must reach the title screen within 10 minutes. */
+const SMOKE_LAUNCH_TIMEOUT_MS = 10 * 60 * 1000;
+
+function cancelledResult(): StepResult {
+  return { status: "cancelled", reason: "已取消", phaseReached: "queued" };
+}
+
+async function prepareJdk(
+  targetDir: string,
+  ctx: StepContext,
+): Promise<{ ok: true; javaMajor: number | null } | { ok: false; result: StepResult }> {
+  ctx.phase("toolchain", "检查 JDK 与工具链");
+  const lines: string[] = [];
+  const log = (line: string) => {
+    lines.push(line);
+    ctx.log(line);
+  };
+  const ok = await (await getProjectJdk()).prepareProjectJdk(targetDir, log, { isCancelled: ctx.isCancelled });
+  if (ctx.isCancelled()) return { ok: false, result: { ...cancelledResult(), phaseReached: "toolchain" } };
+  if (!ok) {
+    const reason = [...lines].reverse().find((line) => /JDK|Java|失败/.test(line)) ?? "JDK 准备失败";
+    return { ok: false, result: { status: "failed", reason, phaseReached: "toolchain" } };
   }
+  const jdk = await getJdkCore();
+  const javaHome = jdk.readJavaHomeFromProject(targetDir);
+  const javaMajor = javaHome ? jdk.detectJavaMajorAt(javaHome) : null;
+  ctx.log(`Gradle 使用 Java ${javaMajor ?? "?"}${javaHome ? `：${javaHome}` : "（系统 JAVA_HOME）"}`);
+  return { ok: true, javaMajor };
 }
 
-export function getRunnerPool(): GradleRunner[] {
-  const size = getBuildConcurrency();
-  if (!runnerPool || runnerPool.length !== size) {
-    if (runnerPool) {
-      void Promise.all(runnerPool.map((runner) => runner.cancel()));
-    }
-    runnerPool = Array.from({ length: size }, () => createGradleRunner());
+function waitNotice(ctx: StepContext, what: string) {
+  return (status: { active: number; max: number; waiting: number }) => {
+    ctx.phase("queued", `等待${what}（${status.active}/${status.max} 运行中）`);
+    ctx.log(`排队：${what}已满（${status.active}/${status.max}），等待空闲…`);
+  };
+}
+
+async function runSlotted(
+  kind: "gradle" | "client",
+  ctx: StepContext,
+  operation: () => Promise<StepResult>,
+): Promise<StepResult> {
+  const withSlot = kind === "gradle" ? withGradleBuildSlot : withClientSlot;
+  try {
+    return await withSlot(operation, {
+      isCancelled: ctx.isCancelled,
+      onWait: waitNotice(ctx, kind === "gradle" ? " Gradle 构建槽位" : "客户端槽位"),
+    });
+  } catch (err) {
+    if (ctx.isCancelled()) return cancelledResult();
+    return { status: "failed", reason: (err as Error).message, phaseReached: "queued" };
   }
-  return runnerPool;
-}
-
-export async function cancelAllRunners(): Promise<void> {
-  await Promise.all(getRunnerPool().map((runner) => runner.cancel()));
-}
-
-export function resetAllRunners(): void {
-  for (const runner of getRunnerPool()) runner.reset();
 }
 
 export function createGradleRunner(): GradleRunner {
-  let cancelled = false;
-  let currentProc: ChildProcess | null = null;
-  let currentIsWin = false;
-
-  const trackProc = (proc: ChildProcess, isWin: boolean) => {
-    currentProc = proc;
-    currentIsWin = isWin;
-  };
-
-  const clearProc = (proc: ChildProcess | null) => {
-    if (currentProc === proc) currentProc = null;
-  };
-
-  const prepareProjectJdk = async (
-    targetDir: string,
-    log: (line: string) => void,
-  ): Promise<boolean> => {
-    if (cancelled) return false;
-    const jdk = await getProjectJdk();
-    return jdk.prepareProjectJdk(targetDir, log, { isCancelled: () => cancelled });
-  };
-
-  const runBuildOnly = async (targetDir: string, log: (line: string) => void): Promise<number> =>
-    withGradleBuildSlot(async () => {
-      const core = await getGradleCore();
-      if (!core.hasGradlew(targetDir)) {
-        log("未找到 gradlew，请确认项目目录有效");
-        return 1;
-      }
-      if (!(await prepareProjectJdk(targetDir, log)) || cancelled) {
-        log("已取消");
-        return 1;
-      }
-
-      log(`正在构建（gradlew build，Gradle 并发 ${getConcurrencyLimits().gradleBuildConcurrency} 路 · 槽内单 Worker）…`);
-      let tracked: ChildProcess | null = null;
-      const code = await core.runGradleBuildTask(targetDir, log, {
-        tasks: ["build", "--no-daemon", "--max-workers=1"],
-        isCancelled: () => cancelled,
-        onProc: (proc, isWin) => { tracked = proc; trackProc(proc, isWin); },
-      });
-      clearProc(tracked);
-      if (cancelled) {
-        log("已取消");
-        return 1;
-      }
-      if (code === 0) log("✔ 构建成功");
-      else log(`构建失败（退出码 ${code}）`);
-      return code;
-    });
-
-  const runClientInternal = async (
-    targetDir: string,
-    log: (line: string) => void,
-    mode: "verify" | "interactive",
-  ): Promise<number> =>
-    withClientSlot(async () => {
-      const core = await getGradleCore();
-      if (!core.hasGradlew(targetDir)) {
-        log("未找到 gradlew，请确认项目目录有效");
-        return 1;
-      }
-      if (!(await prepareProjectJdk(targetDir, log)) || cancelled) {
-        log("已取消");
-        return 1;
-      }
-
-      log(mode === "verify"
-        ? `正在启动 Minecraft 客户端（客户端验证并发 ${getConcurrencyLimits().clientConcurrency} 路）…`
-        : "正在启动 Minecraft 客户端（游戏窗口将保持打开，关闭游戏后结束）…");
-      let tracked: ChildProcess | null = null;
-      const code = await core.runGradleClientTask(targetDir, log, {
-        mode,
-        isCancelled: () => cancelled,
-        onProc: (proc, isWin) => { tracked = proc; trackProc(proc, isWin); },
-      });
-      clearProc(tracked);
-      if (cancelled) {
-        log("已取消");
-        return 1;
-      }
-      if (mode === "interactive") {
-        if (code === 0) log("✔ 客户端已正常退出");
-        else if (code === 1) log("⚠ 进程很快退出且未检测到游戏启动，请查看 Gradle 日志或先执行构建");
-        else log(`客户端异常退出（退出码 ${code}）`);
-      } else if (code === 0) {
-        log("✔ 客户端验证通过");
-      } else {
-        log("客户端验证失败");
-      }
-      return code;
-    });
-
   return {
-    runBuildOnly,
-    runClientOnly: (targetDir, log) => runClientInternal(targetDir, log, "verify"),
-    runClientInteractive: (targetDir, log) => runClientInternal(targetDir, log, "interactive"),
-    isCancelled: () => cancelled,
-    reset: () => {
-      cancelled = false;
-    },
-    cancel: async () => {
-      if (cancelled) return;
-      cancelled = true;
-      const proc = currentProc;
-      if (!proc) return;
-      try {
-        await killProcessTree(proc, currentIsWin);
-      } finally {
-        clearProc(proc);
+    build: (targetDir, ctx, label) => runSlotted("gradle", ctx, async () => {
+      if (ctx.isCancelled()) return cancelledResult();
+      const jdk = await prepareJdk(targetDir, ctx);
+      if (!jdk.ok) return jdk.result;
+      const core = await getGradleCore();
+      await core.ensureFabricApiVersionIfScaffolded(targetDir, ctx.log);
+      await core.pruneDmclGradleCache().catch(() => undefined);
+      ctx.log(`正在构建（gradlew build，Gradle 并发上限 ${getConcurrencyLimits().gradleBuildConcurrency}）…`);
+      const result = await (await getLaunchCore()).runGradleSession(targetDir, {
+        kind: "build",
+        tasks: ["build", "--no-daemon", "--max-workers=1"],
+        label,
+        onLine: ctx.log,
+        onPhase: ctx.phase,
+        isCancelled: ctx.isCancelled,
+      });
+      ctx.log(result.status === "success" ? "✔ 构建成功" : `构建${result.status === "cancelled" ? "已取消" : "失败"}${result.reason ? `：${result.reason}` : ""}`);
+      return { ...result, javaMajor: jdk.javaMajor };
+    }),
+
+    launch: (targetDir, ctx, options) => runSlotted("client", ctx, async () => {
+      if (ctx.isCancelled()) return cancelledResult();
+      const jdk = await prepareJdk(targetDir, ctx);
+      if (!jdk.ok) return jdk.result;
+      const core = await getGradleCore();
+      await core.ensureFabricApiVersionIfScaffolded(targetDir, ctx.log);
+      ctx.log(options.stopAtTitle
+        ? "正在启动客户端（gradlew runClient，进入标题界面后自动关闭）…"
+        : "正在启动客户端（gradlew runClient，只编译运行所需内容；关闭游戏后结束）…");
+      const result = await (await getLaunchCore()).runGradleSession(targetDir, {
+        kind: "run",
+        tasks: ["runClient", "--no-daemon"],
+        label: options.label,
+        onLine: ctx.log,
+        onPhase: ctx.phase,
+        isCancelled: ctx.isCancelled,
+        stopAtTitle: options.stopAtTitle,
+        timeoutMs: options.stopAtTitle ? SMOKE_LAUNCH_TIMEOUT_MS : undefined,
+      });
+      if (result.timeToTitleMs !== undefined) {
+        ctx.log(`✔ 已进入标题界面（Gradle 启动后 ${(result.timeToTitleMs / 1000).toFixed(1)} 秒）`);
       }
-    },
+      ctx.log(result.status === "success" ? "✔ 客户端已结束" : `客户端${result.status === "cancelled" ? "已取消" : "失败"}${result.reason ? `：${result.reason}` : ""}`);
+      return { ...result, javaMajor: jdk.javaMajor };
+    }),
   };
+}
+
+let defaultRunner: GradleRunner | null = null;
+
+export function getDefaultRunner(): GradleRunner {
+  defaultRunner ??= createGradleRunner();
+  return defaultRunner;
 }

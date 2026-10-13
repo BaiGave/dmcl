@@ -15,12 +15,11 @@
     "main.ts",
     "gradle.ts",
     "gradle-runner.ts",
-    "cpu-concurrency.ts",
-    "concurrency-settings.ts",
     "concurrency-governor.ts",
     "build-queue.ts",
     "variant-batch-job.ts",
     "workspace-api.ts",
-    "preload-bridge.ts"
+    "preload-bridge.ts",
+    "api-guard.ts"
   ]
 }

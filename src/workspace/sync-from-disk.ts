@@ -69,6 +69,7 @@ export function syncWorkspaceFromDisk(store: WorkspaceStore): ManagedMod[] {
         mappings: p.mappings,
         buildStatus: vMeta.buildStatus,
         lastBuiltAt: vMeta.lastBuiltAt,
+        lastResult: vMeta.lastResult,
         source: vMeta.source,
         createdAt: vMeta.createdAt,
       };

@@ -32,8 +32,8 @@ if not exist "node_modules\" (
     )
 )
 
-echo [启动] 正在编译并打开 DMCL 窗口...
-call npm run gui
+echo [启动] 正在打开 DMCL 窗口（源码有改动时先增量编译）...
+node scripts\gui-start.mjs
 if errorlevel 1 (
     echo [错误] 启动失败，请把上方日志截图反馈。
     pause

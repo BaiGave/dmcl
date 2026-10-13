@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import type { BuildStatus, ModStatus, VariantSource } from "./types.js";
+import type { BuildStatus, ModStatus, VariantResult, VariantSource } from "./types.js";
 
 export const VARIANT_META_DIR = ".dmcl";
 export const VARIANT_META_FILE = "variant.json";
@@ -20,6 +20,7 @@ export interface VariantMetaFile {
   id: string;
   buildStatus: BuildStatus;
   lastBuiltAt?: string;
+  lastResult?: VariantResult;
   source: VariantSource;
   createdAt: string;
 }
@@ -68,16 +69,12 @@ export function writeVariantMeta(projectPath: string, meta: VariantMetaFile): vo
   fs.writeFileSync(path.join(dir, VARIANT_META_FILE), JSON.stringify(meta, null, 2), "utf8");
 }
 
+/**
+ * Forgets the variant's registration (`.dmcl/variant.json`) only. The rest of `.dmcl/` (toolchain choice,
+ * logs, prepared sources, scaffold marker) belongs to the project and stays.
+ */
 export function deleteVariantMeta(projectPath: string): void {
-  const dir = variantMetaDir(projectPath);
-  if (fs.existsSync(dir)) {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-}
-
-export function deleteModMeta(modDir: string): void {
-  const file = path.join(path.resolve(modDir), MOD_META_FILE);
-  if (fs.existsSync(file)) fs.unlinkSync(file);
+  fs.rmSync(variantMetaPath(projectPath), { force: true });
 }
 
 export function ensureModMeta(

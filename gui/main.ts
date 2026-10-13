@@ -4,7 +4,8 @@ import { spawn, ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { killProcessTree } from "./gradle";
-import { cancelAllRunners, createGradleRunner, type GradleRunner } from "./gradle-runner";
+import { getDefaultRunner, type StepContext } from "./gradle-runner";
+import { createApiGuard } from "./api-guard";
 import { cancelSourceJobs, handleWorkspaceApi, initWorkspace } from "./workspace-api";
 import { loadDist, repoDist } from "./dist-loader";
 import { cancelBuildQueue, onBuildEvent, getQueueStatus, variantJobLabel, type BuildEvent } from "./build-queue";
@@ -32,7 +33,6 @@ async function packagedProjectsRoot(): Promise<string | undefined> {
 interface GenerateSession {
   cancelled: boolean;
   scaffoldChild: ChildProcess | null;
-  runner: GradleRunner;
 }
 
 const generateSessions = new Set<GenerateSession>();
@@ -55,20 +55,22 @@ async function killChildProcess(proc: ChildProcess): Promise<void> {
   } catch { /* ignore */ }
 }
 
+/** The wizard's cancel button: stops project generation only, never queued builds or running games. */
 function cancelAllGenerateSessions(): void {
   for (const session of generateSessions) {
     session.cancelled = true;
     if (session.scaffoldChild) void killChildProcess(session.scaffoldChild);
-    void session.runner.cancel();
   }
 }
 
+/** Quit / window close: everything DMCL started ends; queued and running jobs are recorded as cancelled. */
 function killActiveChild(): void {
   cancelAllGenerateSessions();
-  void cancelAllRunners();
   cancelBuildQueue();
   void cancelSourceJobs();
 }
+
+const apiGuard = createApiGuard(PORT);
 
 function parseGenerateArgs(args: string[]): Record<string, string> {
   const out: Record<string, string> = {};
@@ -197,6 +199,13 @@ function serveGui(req: IncomingMessage, res: ServerResponse): void {
   const urlPath = urlObj.pathname;
   const method = req.method ?? "GET";
 
+  const denied = apiGuard.check(req, urlPath);
+  if (denied) {
+    res.writeHead(denied.status, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ error: denied.error }));
+    return;
+  }
+
   // Workspace API
   handleWorkspaceApi(req, res, urlPath, method).then((handled) => {
     if (handled) return;
@@ -268,7 +277,6 @@ function serveGui(req: IncomingMessage, res: ServerResponse): void {
         const session: GenerateSession = {
           cancelled: false,
           scaffoldChild: null,
-          runner: createGradleRunner(),
         };
         generateSessions.add(session);
 
@@ -289,7 +297,6 @@ function serveGui(req: IncomingMessage, res: ServerResponse): void {
 
         const finish = (exitCode: number) => {
           generateSessions.delete(session);
-          session.runner.reset();
           res.write(`__EXIT__:${exitCode}\n`);
           res.end();
         };
@@ -326,7 +333,7 @@ function serveGui(req: IncomingMessage, res: ServerResponse): void {
     }
 
     if (urlPath === "/api/cancel") {
-      killActiveChild();
+      cancelAllGenerateSessions();
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
       return;
@@ -428,21 +435,25 @@ async function runVerificationWithRunner(
   res.write(`${sep}\n`);
   res.write("正在验证构建（首次需要下载 Minecraft 等依赖，约 5~20 分钟，请耐心等待）…\n");
 
-  const buildCode = await session.runner.runBuildOnly(targetDir, log);
+  const runner = getDefaultRunner();
+  const ctx: StepContext = { log, phase: () => {}, isCancelled: () => session.cancelled };
+  const label = `DMCL new project ${path.basename(targetDir)}`;
+  const build = await runner.build(targetDir, ctx, label);
   if (session.cancelled) {
     res.write("已取消\n");
     await registerGeneratedMod(args, false);
     finish(1);
     return;
   }
-  if (buildCode !== 0) {
+  if (build.status !== "success") {
     await registerGeneratedMod(args, false);
-    finish(buildCode);
+    finish(build.exitCode || 1);
     return;
   }
 
   res.write(`${sep}\n`);
-  const clientCode = await session.runner.runClientOnly(targetDir, log);
+  const client = await runner.launch(targetDir, ctx, { stopAtTitle: true, label });
+  const clientCode = client.status === "success" ? 0 : 1;
   await registerGeneratedMod(args, clientCode === 0 && !session.cancelled);
   finish(session.cancelled ? 1 : clientCode);
 }
@@ -466,10 +477,12 @@ function createWindow(): void {
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "preload-bridge.js"),
+      // The per-session API token reaches the page only through the preload bridge (window.dmcl.apiToken).
+      additionalArguments: [apiGuard.preloadArgument()],
     },
   });
 
-  mainWindow.loadURL(`http://localhost:${PORT}`);
+  mainWindow.loadURL(`http://127.0.0.1:${PORT}`);
   mainWindow.once("ready-to-show", () => mainWindow?.show());
 
   if (process.env.DMCL_DEBUG) {

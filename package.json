@@ -13,7 +13,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "sources:prepare": "tsx scripts/prepare-sources.ts",
-    "test": "npm run build && tsx --test tests/**/*.test.ts",
+    "test": "npm run build && tsc -p gui/tsconfig.json --noEmit && npm run gui:typecheck && node scripts/run-tests.mjs",
     "verify:all": "tsx src/index.ts --verify-all",
     "verify:all:force": "tsx src/index.ts --verify-all --verify-force",
     "matrix:all": "tsx src/index.ts --matrix-all",
@@ -23,8 +23,12 @@
     "tools:prepare": "node scripts/fetch-cfr.mjs",
     "package:win": "npm run tools:prepare && npm run build && npm run gui:build && node scripts/package-win.mjs",
     "gui:bundle": "esbuild gui/renderer-src/main.ts --bundle --outfile=gui/renderer.js --format=iife --target=es2020",
-    "gui:build": "tsc -p gui/tsconfig.json && npm run gui:bundle",
-    "gui": "npm run build && npm run gui:build && node ./node_modules/electron/cli.js gui/main.js"
+    "gui:typecheck": "tsc -p gui/renderer-src/tsconfig.json",
+    "gui:screenshots": "npm run gui:bundle && node ./node_modules/electron/cli.js scripts/gui-screenshots.mjs",
+    "gui:build": "tsc -p gui/tsconfig.json && npm run gui:typecheck && npm run gui:bundle",
+    "gui": "node scripts/gui-start.mjs",
+    "typecheck": "tsc -p . --noEmit && tsc -p gui/tsconfig.json --noEmit && npm run gui:typecheck",
+    "gui:rebuild": "node scripts/gui-start.mjs --rebuild"
   },
   "engines": {
     "node": ">=18"

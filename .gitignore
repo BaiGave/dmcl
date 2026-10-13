@@ -13,3 +13,8 @@ resources/tools/cfr.jar
 projects/*/
 /.tmp/
 /worktrees/
+
+# Generated: GUI main-process JS (tsc -p gui) and the renderer bundle (esbuild); built by npm run gui:build / 启动.bat
+/gui/*.js
+# Stale tsc outputs that used to be committed next to the sources (the build writes to dist/)
+/src/**/*.js

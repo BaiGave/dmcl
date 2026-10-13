@@ -2,7 +2,13 @@ import { state, pathRefreshTimer, setPathRefreshTimer } from "./state";
 import { LOADERS, LOADER_LABELS, STATUS_LABELS, SIDE_LAYOUT_HINTS, SIDE_LAYOUT_HOVER_TIPS, SIDE_LAYOUT_OPTIONS } from "./constants";
 import { $, showError, hideError, setText, notify, showView, esc, showModal, showLogModal, setModalLogContent, getLastLogModalText, closeModal, confirmAction } from "./dom";
 import { hydrateIcons, icon, loaderIcon } from "./icons";
-import { api, fetchWithRetry } from "./api";
+import { api, apiFetch, fetchWithRetry } from "./api";
+import { type JobKind, type JobState, isActive, toMillis, variantStatusOf } from "./contract";
+import { HostActivityMonitor, askLaunchWhileBusy, shouldWarnBeforeLaunch } from "./host-activity";
+import { launchPanel, lastJobFor, rememberJob } from "./launch-panel";
+import { jobHeadline } from "./phases";
+import { refreshRelativeTimes, renderVariantCards } from "./variant-card";
+import { humanTime, statusView } from "./status";
 
 export function bootWorkbench(): void {
 
@@ -39,9 +45,10 @@ export function bootWorkbench(): void {
     state.mods.forEach(function (mod) {
       (mod.variants || []).forEach(function (variant) {
         totalVariants++;
-        if (variant.buildStatus === "success") builtVariants++;
-        if (variant.buildStatus === "failed") failedVariants++;
-        if (variant.buildStatus === "building") runningVariants++;
+        var tone = variantTone(variant);
+        if (tone === "success") builtVariants++;
+        if (tone === "danger") failedVariants++;
+        if (tone === "running" || tone === "queued") runningVariants++;
         loaders[variant.loader] = true;
       });
     });
@@ -94,16 +101,21 @@ export function bootWorkbench(): void {
   function buildHealth(mod) {
     var total = mod.variants.length;
     if (total === 0) return "无变体";
-    var ok = mod.variants.filter(function (v) { return v.buildStatus === "success"; }).length;
+    var ok = mod.variants.filter(function (v) { return variantTone(v) === "success"; }).length;
     return ok + "/" + total + " 变体已构建";
+  }
+
+  /** Status tone of a variant; old failures read as history ("stale"), not as alarms. */
+  function variantTone(variant) {
+    return statusView(variantStatusOf(variant)).tone;
   }
 
   function buildHealthData(mod) {
     var variants = mod.variants || [];
     var total = variants.length;
-    var ready = variants.filter(function (v) { return v.buildStatus === "success"; }).length;
-    var failed = variants.filter(function (v) { return v.buildStatus === "failed"; }).length;
-    var running = variants.filter(function (v) { return v.buildStatus === "building"; }).length;
+    var ready = variants.filter(function (v) { return variantTone(v) === "success"; }).length;
+    var failed = variants.filter(function (v) { return variantTone(v) === "danger"; }).length;
+    var running = variants.filter(function (v) { var t = variantTone(v); return t === "running" || t === "queued"; }).length;
     return { total: total, ready: ready, failed: failed, running: running, percent: total ? Math.round(ready / total * 100) : 0 };
   }
 
@@ -113,15 +125,13 @@ export function bootWorkbench(): void {
   }
 
   function lastBuilt(mod) {
-    var times = mod.variants
-      .filter(function (v) { return v.lastBuiltAt; })
-      .map(function (v) { return new Date(v.lastBuiltAt).getTime(); });
-    if (!times.length) return "从未构建";
-    var latest = Math.max.apply(null, times);
-    var diff = Date.now() - latest;
-    if (diff < 3600000) return "上次构建 " + Math.round(diff / 60000) + " 分钟前";
-    if (diff < 86400000) return "上次构建 " + Math.round(diff / 3600000) + " 小时前";
-    return "上次构建 " + Math.round(diff / 86400000) + " 天前";
+    var latest = 0;
+    (mod.variants || []).forEach(function (v) {
+      var at = toMillis(variantStatusOf(v).at);
+      if (at !== null && at > latest) latest = at;
+    });
+    var label = latest ? humanTime(latest) : null;
+    return label ? "最近活动 " + label : "尚未构建或启动";
   }
 
   function renderModList() {
@@ -184,7 +194,7 @@ export function bootWorkbench(): void {
           '<span class="mod-avatar">' + esc(modInitials(mod.displayName)) + '</span>' +
           '<span class="mod-card-content"><span class="mod-title-row"><strong>' + esc(mod.displayName) + '</strong><span class="badge badge-' + mod.status + '">' + STATUS_LABELS[mod.status] + '</span></span>' +
           '<span class="variant-chips">' + (variants || '<span class="variant-chip muted">暂无变体</span>') + (remaining ? '<span class="variant-chip more">+' + remaining + '</span>' : '') + '</span>' +
-          '<span class="health-row"><span class="health-track"><i data-health="' + health.percent + '"></i></span><span>' + health.ready + '/' + health.total + ' 就绪' + (health.failed ? ' · ' + health.failed + ' 失败' : '') + (health.running ? ' · ' + health.running + ' 构建中' : '') + '</span></span>' +
+          '<span class="health-row"><span class="health-track"><i data-health="' + health.percent + '"></i></span><span>' + health.ready + '/' + health.total + ' 就绪' + (health.failed ? ' · ' + health.failed + ' 失败' : '') + (health.running ? ' · ' + health.running + ' 进行中' : '') + '</span></span>' +
           '<span class="last-built">' + icon("clock") + lastBuilt(mod) + '</span></span>' +
           '<span class="card-chevron">' + icon("chevron-left") + '</span>' +
         '</button>';
@@ -289,13 +299,20 @@ export function bootWorkbench(): void {
     setMatrixRefreshing(false);
   }
 
+  var lastMatrixSig = "";
+
   function renderDetailContent(mod, matrix) {
     $("detail-name").textContent = mod.displayName;
     $("detail-meta").innerHTML =
       '<span>modId: ' + esc(mod.modId) + '</span>' +
       '<span>状态: ' + STATUS_LABELS[mod.status] + '</span>' +
       '<span>变体: ' + mod.variants.length + '</span>';
-    renderMatrix(mod, matrix);
+    // Re-rendering the matrix resets its horizontal scroll; skip it when nothing changed.
+    var matrixSig = mod.id + "|" + state.matrixFilter + "|" + JSON.stringify(matrix);
+    if (matrixSig !== lastMatrixSig || !$("matrix-wrap")?.querySelector("table.matrix")) {
+      lastMatrixSig = matrixSig;
+      renderMatrix(mod, matrix);
+    }
     renderVariantList(mod);
     updateBuildAllButton(mod);
   }
@@ -305,7 +322,7 @@ export function bootWorkbench(): void {
     var count = 0;
     (mod.variants || []).forEach(function (v) {
       if (opts.loader && v.loader !== opts.loader) return;
-      if (opts.failedOnly && v.buildStatus !== "failed") return;
+      if (opts.failedOnly && variantStatusOf(v).state !== "failed") return;
       count++;
     });
     return count;
@@ -357,7 +374,7 @@ export function bootWorkbench(): void {
 
     var requestId = ++state.detailRequestId;
     var cached = state.detailCache[modId];
-    var showMatrixRefresh = opts.force && requestId === state.detailRequestId && modId === state.currentModId;
+    var showMatrixRefresh = opts.force && !opts.quiet && requestId === state.detailRequestId && modId === state.currentModId;
 
     if (!opts.force && cached && !isDetailStale(cached)) {
       if (requestId === state.detailRequestId && modId === state.currentModId) {
@@ -396,14 +413,14 @@ export function bootWorkbench(): void {
     } catch (e) {
       if (requestId !== state.detailRequestId) return;
       clearMatrixLoadingMeta();
-      showError("加载详情失败：" + e.message);
+      if (!opts.quiet) showError("加载详情失败：" + e.message);
     }
   }
 
   function cellLabel(status) {
     if (status === "built") return "已构建";
     if (status === "failed") return "失败";
-    if (status === "building") return "构建中";
+    if (status === "building") return "进行中";
     if (status === "exists") return "已存在";
     if (status === "available") return "可创建";
     return "不支持";
@@ -450,10 +467,10 @@ export function bootWorkbench(): void {
         actionButton.className = "matrix-cell";
         actionButton.innerHTML = '<span class="matrix-dot" aria-hidden="true"></span><span>' + cellLabel(status) + '</span>';
         actionButton.setAttribute("aria-label", ldr.label + " " + ver + "，" + cellLabel(status));
-        actionButton.disabled = status === "unsupported" || status === "building";
+        actionButton.disabled = status === "unsupported";
         td.title = ldr.label + " " + ver + " — " + cellLabel(status);
 
-        if (status === "built" || status === "failed" || status === "exists") {
+        if (cell && cell.variantId && status !== "available" && status !== "unsupported") {
           actionButton.addEventListener("click", function () {
             scrollToVariant(cell.variantId);
           });
@@ -485,8 +502,13 @@ export function bootWorkbench(): void {
   }
 
   function scrollToVariant(variantId) {
-    var el = document.querySelector('[data-variant-id="' + variantId + '"]');
-    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+    var el = document.querySelector<HTMLElement>('[data-variant-id="' + variantId + '"]');
+    if (!el) return;
+    el.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "center" });
+    el.classList.remove("is-spotlit");
+    requestAnimationFrame(function () { el.classList.add("is-spotlit"); });
+    setTimeout(function () { el.classList.remove("is-spotlit"); }, 1400);
+    el.querySelector<HTMLElement>(".btn-launch")?.focus({ preventScroll: true });
   }
 
   function pickSourceVariant(mod) {
@@ -691,7 +713,7 @@ export function bootWorkbench(): void {
     showModal("生成变体", "正在生成…");
 
     try {
-      var resp = await fetch("/api/mods/" + mod.id + "/variants", {
+      var resp = await apiFetch("/api/mods/" + mod.id + "/variants", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -744,91 +766,30 @@ export function bootWorkbench(): void {
 
   function renderVariantList(mod) {
     var list = $("variant-list");
-    list.innerHTML = "";
-
+    if (!list) return;
     if (!mod.variants.length) {
-      list.innerHTML = '<div class="empty-state inline-empty">暂无变体；可在矩阵中选择“可创建”单元格生成</div>';
+      list.innerHTML = '<div class="empty-inline">' + icon("sparkles") + '<div><strong>还没有变体</strong><span>在上方矩阵中点击「可创建」的格子，即可生成对应加载器与版本的项目。</span></div></div>';
       return;
     }
-
-    mod.variants.forEach(function (v) {
-      var item = document.createElement("div");
-      item.className = "variant-item status-" + (v.buildStatus || "idle");
-      item.dataset.variantId = v.id;
-
-      var statusText = v.buildStatus === "success" ? "就绪"
-        : v.buildStatus === "failed" ? "失败"
-        : v.buildStatus === "building" ? "任务进行中" : "未验证";
-
-      var missingBtn = "";
-      var sourceReady = v.sourceStatus?.ready === true;
-      var sourceMods = v.sourceStatus?.mods || [];
-      var sourceReports = sourceMods.filter(function (m) { return !!m.reportFilePath; });
-      var sourceText = sourceReady
-        ? (v.sourceStatus?.minecraftReady
-          ? "开发源码已准备 · MC + " + (v.sourceStatus.modCount || 0) + " 个模组"
-          : (v.sourceStatus.modCount || 0) + " 个模组源码已准备")
-        : "开发源码尚未准备";
-
-      if (sourceReady && sourceReports.length) sourceText += " / " + sourceReports.length + " reports";
-
-      item.innerHTML =
-        '<div class="variant-item-header">' +
-          '<span class="loader-badge loader-' + esc(v.loader) + '">' + loaderIcon(v.loader) + '</span>' +
-          '<div><h4>' + LOADER_LABELS[v.loader] + ' ' + esc(v.mcVersion) + ' <span>· v' + esc(v.modVersion) + '</span></h4>' +
-          '<div class="path" title="' + esc(v.projectPath) + '">' + esc(v.projectPath) + '</div>' +
-          '<div class="variant-status"><span class="status-dot"></span>' + statusText + '</div>' +
-          '<div class="variant-source-state' + (sourceReady ? ' ready' : '') + '">' + icon("sparkles") + esc(sourceText) + '</div></div>' +
-        '</div>' +
-        '<div class="variant-actions">' +
-          '<button class="btn btn-primary btn-sm" data-action="build">' + icon("build") + '构建</button>' +
-          '<button class="btn btn-secondary btn-sm" data-action="run">' + icon("play") + '启动</button>' +
-          '<button class="btn btn-secondary btn-sm btn-prepare-sources" data-action="source-hub">' + icon(sourceReady ? "folder" : "sparkles") + '源码</button>' +
-          '<button class="btn btn-icon" data-action="folder" title="打开项目文件夹" aria-label="打开项目文件夹">' + icon("folder") + '</button>' +
-          '<details class="action-menu"><summary class="btn btn-quiet btn-sm" aria-label="更多变体操作">' + icon("more") + '</summary>' +
-            '<div class="action-menu-popover">' +
-              '<button data-action="logs">日志</button>' +
-              '<button data-action="cursor">用 Cursor 打开</button>' +
-              '<button data-action="relocate">重新定位项目</button>' + missingBtn +
-              '<span class="menu-separator"></span>' +
-              '<button data-action="unlink">仅移除登记</button>' +
-              '<button class="menu-danger" data-action="delete">删除变体</button>' +
-            '</div></details>' +
-        '</div>';
-
-      if (sourceReports.length) {
-        var popover = item.querySelector(".action-menu-popover");
-        var separator = popover?.querySelector(".menu-separator");
-        var reportButton = document.createElement("button");
-        reportButton.type = "button";
-        reportButton.dataset.action = "sources-report";
-        reportButton.textContent = "Open dependency API reports";
-        popover?.insertBefore(reportButton, separator || null);
-      }
-
-      item.querySelectorAll("[data-action]").forEach(function (btn) {
-        btn.addEventListener("click", function (e) {
-          e.stopPropagation();
-          var menu = btn.closest("details");
-          if (menu) menu.removeAttribute("open");
-          void variantAction(mod.id, v, btn.dataset.action).catch(function (err) {
-            showError("操作失败：" + ((err as Error).message || String(err)));
-          });
+    renderVariantCards(list, mod.variants, {
+      hasJob: function (variantId) { return !!lastJobFor(variantId); },
+      onAction: function (variant, action) {
+        void variantAction(mod.id, variant, action).catch(function (err) {
+          showError("操作失败：" + ((err as Error).message || String(err)));
         });
-      });
-      list.appendChild(item);
+      },
     });
   }
 
   async function openVariantSourceReports(variant) {
     var mods = (variant.sourceStatus?.mods || []).filter(function (m) { return !!m.reportFilePath; });
     if (!mods.length) {
-      notify("No dependency API reports are available yet", "warning");
+      notify("还没有可用的依赖 API 报告", "warning");
       return;
     }
     if (mods.length === 1) {
       await api("/api/open-folder", { method: "POST", body: { path: mods[0].reportFilePath } });
-      notify("Opened dependency API report");
+      notify("已打开依赖 API 报告");
       return;
     }
     var reportRoot = variant.sourceStatus?.rootPath
@@ -836,17 +797,17 @@ export function bootWorkbench(): void {
       : mods[0].reportFilePath;
     await api("/api/open-folder", { method: "POST", body: { path: reportRoot } });
     showLogModal(
-      "Dependency API Reports",
+      "依赖 API 报告",
       mods.map(function (m) {
         return [
           (m.modName || m.modId) + " " + (m.modVersion || ""),
-          "  source: " + (m.sourceKind || "unknown") + (m.confidence ? " / " + m.confidence : ""),
-          "  license: " + (m.license?.id || m.license?.name || "unknown"),
-          "  report: " + m.reportFilePath,
+          "  来源：" + (m.sourceKind || "未知") + (m.confidence ? " / " + m.confidence : ""),
+          "  许可证：" + (m.license?.id || m.license?.name || "未知"),
+          "  报告：" + m.reportFilePath,
         ].join("\n");
       }).join("\n\n"),
     );
-    notify("Opened dependency reports folder");
+    notify("已打开依赖报告文件夹");
   }
 
   var sourceHubState = {
@@ -1151,19 +1112,115 @@ export function bootWorkbench(): void {
     }
   }
 
+  // ============ 启动与任务面板 ============
+
+  var hostMonitor = new HostActivityMonitor($("topbar-status"));
+  hostMonitor.start();
+
+  var panel = launchPanel({
+    onJobFinished: function (job) {
+      updateQueueBar();
+      if (state.currentModId) {
+        invalidateDetailCache(state.currentModId);
+        void refreshDetail({ force: true, quiet: true });
+      }
+      void loadMods();
+      if (!panel.isOpen) {
+        notify(jobHeadline(job), job.state === "failed" ? "error" : job.state === "succeeded" ? "success" : "warning");
+      }
+    },
+    onRelaunch: function (pv, kind) {
+      var found = findVariant(pv.id);
+      if (found) void launchVariant(found.mod.id, found.variant, kind).catch(reportActionError);
+    },
+  });
+
+  function reportActionError(err) {
+    showError("操作失败：" + ((err as Error).message || String(err)));
+  }
+
+  function findVariant(variantId) {
+    for (var i = 0; i < state.mods.length; i++) {
+      var mod = state.mods[i];
+      var variant = (mod.variants || []).find(function (v) { return v.id === variantId; });
+      if (variant) return { mod: mod, variant: variant };
+    }
+    return null;
+  }
+
+  function variantLabel(variant) {
+    return (LOADER_LABELS[variant.loader] || variant.loader) + " " + variant.mcVersion;
+  }
+
+  /** The stored result of a variant, for the older backend once its live log is gone. */
+  async function storedOutcome(modId, variantId): Promise<JobState> {
+    for (var attempt = 0; attempt < 4; attempt++) {
+      try {
+        var detail = await api("/api/mods/" + modId + "/detail");
+        var v = ((detail.mod && detail.mod.variants) || []).find(function (x) { return x.id === variantId; });
+        var st = v ? variantStatusOf(v).state : "unknown";
+        if (st === "succeeded" || st === "failed" || st === "cancelled") return st;
+        if (st === "unknown") return "cancelled";
+      } catch { /* retry */ }
+      await new Promise(function (r) { setTimeout(r, 600); });
+    }
+    return "failed";
+  }
+
+  function openJobPanel(modId, variant, jobId: string | null, kind: JobKind, follow: boolean) {
+    var mod = state.mods.find(function (m) { return m.id === modId; });
+    void panel.open({
+      variant: {
+        id: variant.id,
+        loader: variant.loader,
+        mcVersion: variant.mcVersion,
+        modVersion: variant.modVersion,
+        projectPath: variant.projectPath,
+        modName: mod ? mod.displayName : undefined,
+      },
+      jobId: jobId,
+      kind: kind,
+      follow: follow,
+      outcome: function () { return storedOutcome(modId, variant.id); },
+    });
+  }
+
+  /** 启动 / 构建: warns first when Linker tests or other heavy work share the host. */
+  async function launchVariant(modId, variant, kind: JobKind) {
+    if (kind === "run") {
+      var activity = await hostMonitor.current(3000);
+      if (activity && shouldWarnBeforeLaunch(activity)) {
+        var go = await askLaunchWhileBusy(activity, variantLabel(variant));
+        if (!go) { notify("已暂缓启动 " + variantLabel(variant)); return; }
+      }
+    }
+    var result = await api("/api/variants/" + encodeURIComponent(variant.id) + "/" + kind, {
+      method: "POST",
+      body: kind === "build" ? { runClient: false } : {},
+    });
+    var jobId = result && typeof result.jobId === "string" ? result.jobId : null;
+    if (jobId) rememberJob(variant.id, jobId, kind);
+    openJobPanel(modId, variant, jobId, kind, true);
+    updateQueueBar();
+    invalidateDetailCache(modId);
+    await refreshDetail({ force: true, quiet: true });
+  }
+
+  /** 查看进度 / 日志: reopens the active or last job, else shows the saved log. */
+  function showVariantJob(modId, variant) {
+    var status = variantStatusOf(variant);
+    var remembered = lastJobFor(variant.id);
+    var active = isActive(status.state);
+    var jobId = status.activeJobId || (remembered ? remembered.jobId : null);
+    var kind: JobKind = status.kind || (remembered ? remembered.kind : "run");
+    openJobPanel(modId, variant, jobId, kind, active);
+  }
+
   async function variantAction(modId, variant, action) {
-    if (action === "build") {
-      await api("/api/variants/" + variant.id + "/build", { method: "POST", body: { runClient: false } });
-      updateQueueBar();
-      invalidateDetailCache(modId);
-      await refreshDetail({ force: true });
-      notify("构建任务已加入队列");
-    } else if (action === "run") {
-      await api("/api/variants/" + variant.id + "/run", { method: "POST" });
-      updateQueueBar();
-      invalidateDetailCache(modId);
-      await refreshDetail({ force: true });
-      notify("客户端正在启动，请稍候（首次需下载依赖，游戏窗口打开前队列会显示运行中）");
+    if (action === "run" || action === "build") {
+      await launchVariant(modId, variant, action);
+    } else if (action === "view-job" || action === "logs") {
+      showVariantJob(modId, variant);
     } else if (action === "source-hub") {
       await openSourceHub(modId, variant);
     } else if (action === "sources-report") {
@@ -1174,27 +1231,6 @@ export function bootWorkbench(): void {
     } else if (action === "cursor") {
       await api("/api/open-cursor", { method: "POST", body: { path: variant.projectPath } });
       notify("已请求用 Cursor 打开项目");
-    } else if (action === "logs") {
-      var logPayload = await api("/api/variants/" + encodeURIComponent(variant.id) + "/log") as {
-        content?: string;
-        source?: string;
-        fileName?: string;
-        hint?: string;
-      };
-      var body = (logPayload.content || "").trim();
-      if (!body) {
-        showLogModal(
-          "构建日志 — " + (LOADER_LABELS[variant.loader] || variant.loader) + " " + variant.mcVersion,
-          logPayload.hint || "暂无构建日志。请先执行一次「构建」，或等待当前队列任务完成。",
-        );
-        return;
-      }
-      var title = "构建日志 — " + (LOADER_LABELS[variant.loader] || variant.loader) + " " + variant.mcVersion;
-      if (logPayload.source === "live") title += "（实时）";
-      else if (logPayload.fileName) title += " · " + logPayload.fileName;
-      showLogModal(title, body);
-      if (logPayload.source === "live") startLiveLogPolling(variant.id);
-      else stopLiveLogPolling();
     } else if (action === "relocate") {
       var pick = await api("/api/select-dir");
       if (!pick.path) return;
@@ -1242,40 +1278,6 @@ export function bootWorkbench(): void {
   // ============ 构建队列 ============
 
   var queueSummaryUntil = 0;
-  var liveLogPollTimer: ReturnType<typeof setInterval> | null = null;
-  var liveLogPollVariantId: string | null = null;
-
-  function stopLiveLogPolling() {
-    if (liveLogPollTimer) {
-      clearInterval(liveLogPollTimer);
-      liveLogPollTimer = null;
-    }
-    liveLogPollVariantId = null;
-  }
-
-  function startLiveLogPolling(variantId: string) {
-    stopLiveLogPolling();
-    liveLogPollVariantId = variantId;
-    liveLogPollTimer = setInterval(function () {
-      void (async function () {
-        if (!liveLogPollVariantId) return;
-        try {
-          var next = await api("/api/variants/" + encodeURIComponent(liveLogPollVariantId) + "/log") as {
-            content?: string;
-            source?: string;
-          };
-          if (next.source === "live" && next.content) {
-            setModalLogContent(next.content, { scrollToEnd: true });
-          } else {
-            stopLiveLogPolling();
-          }
-        } catch {
-          /* 轮询失败时继续 */
-        }
-      })();
-    }, 2000);
-  }
-
   function burstBuildParticles(target) {
     if (!target || reduceMotion) return;
     var burst = document.createElement("span");
@@ -1326,6 +1328,8 @@ export function bootWorkbench(): void {
   async function updateQueueBar() {
     var bar = $("queue-bar");
     if (!bar) return;
+    var openBtn = $("queue-open");
+    if (openBtn) openBtn.hidden = !(panel && panel.currentJob && !panel.isOpen);
     try {
       var data = await api("/api/queue");
       var active = data.active || (data.running && data.current ? 1 : 0);
@@ -1394,6 +1398,7 @@ export function bootWorkbench(): void {
 
   if (window.dmclBridge) {
     window.dmclBridge.onBuildEvent(function (event) {
+      if (event.type === "progress") return;
       updateQueueBar();
       if (event.type === "done") trackBuildBatchDone(event);
       if (event.type === "cancelled") finalizeBuildBatch(true);
@@ -1402,19 +1407,39 @@ export function bootWorkbench(): void {
         refreshDetail({ force: true });
         if (event.type === "done") loadMods();
       }
-      if (event.type === "progress" && $("modal-overlay").classList.contains("visible")) {
-        var log = $("modal-log");
-        if (log && event.line) {
-          var div = document.createElement("div");
-          div.textContent = event.line;
-          log.appendChild(div);
-          log.scrollTop = log.scrollHeight;
-        }
-      }
+    });
+    window.dmclBridge.onBuildSummary?.(function (summary) {
+      showBuildSummaryFeedback(summary);
+    });
+    window.dmclBridge.onNotificationOpen?.(async function (payload) {
+      var variantId = payload && payload.targetVariantId;
+      if (!variantId) { showView("list"); return; }
+      await loadMods();
+      var mod = state.mods.find(function (candidate) {
+        return (candidate.variants || []).some(function (variant) { return variant.id === variantId; });
+      });
+      if (!mod) { showView("list"); return; }
+      await openDetail(mod.id);
+      requestAnimationFrame(function () { scrollToVariant(variantId); });
     });
   }
 
   setInterval(updateQueueBar, 5000);
+
+  // While a variant of the open mod is queued or running, keep its card current even
+  // when the backend sends no push events (job API) — cards are keyed, so this is cheap.
+  setInterval(function () {
+    if (document.hidden || !state.currentModId) return;
+    var mod = state.mods.find(function (m) { return m.id === state.currentModId; });
+    if (!mod) return;
+    var active = (mod.variants || []).some(function (v) { return isActive(variantStatusOf(v).state); });
+    if (active) void refreshDetail({ force: true, quiet: true });
+  }, 3000);
+
+  setInterval(function () {
+    var list = $("variant-list");
+    if (list) refreshRelativeTimes(list);
+  }, 30000);
 
   // ============ 新建向导 ============
 
@@ -1576,20 +1601,6 @@ export function bootWorkbench(): void {
       item.classList.toggle("active", index === current);
       item.classList.toggle("done", index >= 0 && index < current);
     });
-    window.dmclBridge.onBuildSummary?.(function (summary) {
-      showBuildSummaryFeedback(summary);
-    });
-    window.dmclBridge.onNotificationOpen?.(async function (payload) {
-      var variantId = payload && payload.targetVariantId;
-      if (!variantId) { showView("list"); return; }
-      await loadMods();
-      var mod = state.mods.find(function (candidate) {
-        return (candidate.variants || []).some(function (variant) { return variant.id === variantId; });
-      });
-      if (!mod) { showView("list"); return; }
-      await openDetail(mod.id);
-      requestAnimationFrame(function () { scrollToVariant(variantId); });
-    });
   }
 
   async function showCreateConfirmation() {
@@ -1725,7 +1736,7 @@ export function bootWorkbench(): void {
         state.batchAbortControllers.forEach(function (ac) { ac.abort(); });
         state.batchAbortControllers = null;
       }
-      fetch("/api/cancel").catch(function () {});
+      apiFetch("/api/cancel").catch(function () {});
       showCreateStep("step-config");
     });
   }
@@ -2109,7 +2120,7 @@ export function bootWorkbench(): void {
   async function runGenerateStream(args, opts) {
     opts = opts || {};
     var log = opts.logEl || $("gen-log");
-    var resp = await fetch("/api/generate", {
+    var resp = await apiFetch("/api/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ args: args, scaffoldOnly: !!opts.scaffoldOnly }),
@@ -2958,10 +2969,10 @@ export function bootWorkbench(): void {
       var loaders = (item.loaders || []).map(function (loader) { return LOADER_LABELS[loader] || loader; }).join("/");
       var versions = (item.versions || []).slice(0, 4).join(" ");
       var tags = [
-        loaders || "Any loader",
+        loaders || "任意加载器",
         versions || "Any MC",
-        item.license || "unknown license",
-        item.openSource ? "source" : "no source link",
+        item.license || "许可证未知",
+        item.openSource ? "有源码" : "无源码链接",
       ].filter(Boolean);
       button.innerHTML =
         '<span class="adapt-icon">' + iconHtml + '</span>' +
@@ -2970,7 +2981,7 @@ export function bootWorkbench(): void {
           '<span class="adapt-result-desc">' + esc(item.description || "") + '</span>' +
           '<span class="adapt-tags">' + tags.map(function (tag) { return '<span>' + esc(tag) + '</span>'; }).join("") + '</span>' +
         '</span>' +
-        '<span class="adapt-result-stat">' + (item.downloads ? Number(item.downloads).toLocaleString() + " dl" : "") + '</span>';
+        '<span class="adapt-result-stat">' + (item.downloads ? Number(item.downloads).toLocaleString() + " 下载" : "") + '</span>';
       button.addEventListener("click", function () {
         void selectAdaptResult(item).catch(function (err) { showError("解析模组失败：" + (err as Error).message); });
       });
@@ -3035,7 +3046,7 @@ export function bootWorkbench(): void {
     var fileList = files.length
       ? files.map(function (file) { return '<span>' + esc(file.fileName) + '</span>'; }).join("")
       : '<span>无文件记录</span>';
-    var snippet = (target.dependencySnippets || [])[0] || "No dependency snippet is available for this provider.";
+    var snippet = (target.dependencySnippets || [])[0] || "该来源没有可用的依赖声明片段。";
     var result = adaptState.lastSourceResult;
     detail.innerHTML =
       '<button class="back-link" id="adapt-detail-back" type="button">' + icon("chevron-left") + '返回搜索结果</button>' +
@@ -3437,7 +3448,6 @@ export function bootWorkbench(): void {
   // ============ Modal ============
 
   $("modal-close").addEventListener("click", function () {
-    stopLiveLogPolling();
     closeModal();
   });
   $("modal-copy-log")?.addEventListener("click", async function () {
@@ -3473,7 +3483,6 @@ export function bootWorkbench(): void {
   });
   $("modal-overlay")?.addEventListener("click", function (event) {
     if (event.target === $("modal-overlay")) {
-      stopLiveLogPolling();
       closeModal();
     }
   });
@@ -3647,7 +3656,7 @@ export function bootWorkbench(): void {
       var closeBtn = $("modal-close") as HTMLButtonElement | null;
       if (closeBtn) closeBtn.disabled = true;
 
-      var resp = await fetch("/api/mods/" + modId, {
+      var resp = await apiFetch("/api/mods/" + modId, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -3808,7 +3817,7 @@ export function bootWorkbench(): void {
   function filterVariantsForBuildAll(mod, opts) {
     return (mod.variants || []).filter(function (v) {
       if (opts.loader && v.loader !== opts.loader) return false;
-      if (opts.failedOnly && v.buildStatus !== "failed") return false;
+      if (opts.failedOnly && variantStatusOf(v).state !== "failed") return false;
       return true;
     });
   }
@@ -4644,6 +4653,11 @@ export function bootWorkbench(): void {
       showView("list");
       ($("search-mods") as HTMLInputElement | null)?.focus();
     }
+  });
+
+  $("queue-open")?.addEventListener("click", function () {
+    panel.reopen();
+    updateQueueBar();
   });
 
   $("queue-cancel").addEventListener("click", async function () {

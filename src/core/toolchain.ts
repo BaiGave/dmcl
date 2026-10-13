@@ -8,11 +8,9 @@ import {
   ensureProjectJdk,
   resolveBuildJdk,
   gradleJvmRange,
-  pickJdkMajor,
+  analyzeJdkNeed,
   readGradleVersion,
-  readLoomVersion,
   readMcVersionFromProject,
-  requiredJavaFor,
   usesForgeGradleLegacy,
   type BuildJdk,
   type BuildJdkOptions,
@@ -20,6 +18,7 @@ import {
   type JdkOptions,
 } from "./jdk.js";
 import { saveToolchainMetadata } from "./toolchain-metadata.js";
+import { hasScaffoldMarker } from "./scaffold-marker.js";
 import { ensureForgeMavenizerJdkCache, usesForgeGradle } from "./forge-mavenizer.js";
 import { minimumGradleForJvm } from "./version-toolchain.js";
 
@@ -51,13 +50,7 @@ export interface ScaffoldMarker {
   dmclVersion: string;
 }
 
-/**
- * 项目由 DMCL 脚手架生成，DMCL 才可改写其 gradle.properties 与 Gradle Wrapper。
- * 导入项目即使位于工作区 projects 目录或写过 .dmcl 工具链记录也不算。
- */
-export function hasScaffoldMarker(targetDir: string): boolean {
-  return fs.existsSync(path.join(path.resolve(targetDir), ".dmcl", "scaffold.json"));
-}
+export { hasScaffoldMarker } from "./scaffold-marker.js";
 
 export async function writeScaffoldMarker(
   targetDir: string,
@@ -103,30 +96,22 @@ export function resolveProjectToolchain(
   if (!mc) return null;
 
   const loader = detectProjectLoader(targetDir);
-  const gradleVersion = readGradleVersion(targetDir);
-  const loomVersion = readLoomVersion(targetDir);
-  const compileJavaMajor = usesForgeGradleLegacy(targetDir) ? 8 : requiredJavaFor(mc);
-  const range = gradleVersion ? gradleJvmRange(gradleVersion) : { min: 17, max: 25 };
-  const gradleRuntimeJdkMajor = pickJdkMajor(mc, targetDir);
+  const need = analyzeJdkNeed(targetDir, mc);
+  const { gradleVersion, loomVersion } = need;
+  const compileJavaMajor = need.compileMajor;
+  const gradleRuntimeJdkMajor = need.major;
+  const gradleMaxJvm = gradleVersion ? gradleJvmRange(gradleVersion).max : 25;
   const needsForgeMavenizer = usesForgeGradle(targetDir);
+  const summary = needsForgeMavenizer ? `${need.summary} + Forge Mavenizer JDK 8` : need.summary;
 
-  const bits: string[] = [];
-  if (gradleVersion) bits.push(`Gradle ${gradleVersion}`);
-  if (loomVersion) bits.push(`Loom ${loomVersion}`);
-  bits.push(`Minecraft ${mc} → Java ${compileJavaMajor}`);
-  if (needsForgeMavenizer) bits.push("Forge Mavenizer JDK 8");
-  const summary = bits.join(" + ");
-
-  let incompatibleReason: string | undefined;
+  let incompatibleReason = need.incompatibleReason;
   let gradleUpgradeRecommended: string | undefined;
 
-  if (gradleRuntimeJdkMajor > range.max) {
-    const targetGradle = minimumGradleForJvm(compileJavaMajor);
+  if (gradleRuntimeJdkMajor > gradleMaxJvm) {
+    const targetGradle = minimumGradleForJvm(gradleRuntimeJdkMajor);
     if (gradleVersion && !gradleVersionAtLeast(gradleVersion, targetGradle)) {
       gradleUpgradeRecommended = targetGradle;
-      incompatibleReason = `Gradle ${gradleVersion} 最高支持 Java ${range.max}，但 Minecraft ${mc} 需要 Java ${compileJavaMajor}；建议升级 Wrapper 至 ${targetGradle}`;
-    } else {
-      incompatibleReason = `Gradle ${gradleVersion ?? "unknown"} 最高支持 Java ${range.max}，但项目需要 Java ${gradleRuntimeJdkMajor}`;
+      incompatibleReason = `Gradle ${gradleVersion} 最高支持 Java ${gradleMaxJvm}，但项目需要 Java ${gradleRuntimeJdkMajor}；建议升级 Wrapper 至 ${targetGradle}`;
     }
   }
 
@@ -137,8 +122,8 @@ export function resolveProjectToolchain(
     loomVersion,
     compileJavaMajor,
     gradleRuntimeJdkMajor,
-    gradleJvmMin: range.min,
-    gradleJvmMax: range.max,
+    gradleJvmMin: need.minMajor,
+    gradleJvmMax: need.maxMajor,
     needsForgeMavenizer,
     forgeMavenizerJdkMajor: 8,
     summary,

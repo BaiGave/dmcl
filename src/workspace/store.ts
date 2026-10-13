@@ -2,11 +2,18 @@ import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import type { BuildStatus, ManagedMod, ModVariant, WorkspaceData } from "./types.js";
+import type {
+  BuildStatus,
+  JobKind,
+  ManagedMod,
+  ModVariant,
+  VariantResult,
+  VariantStatus,
+  WorkspaceData,
+} from "./types.js";
 import { invalidateMatrixCache } from "./matrix.js";
 import { assertValidModId } from "./validate.js";
 import {
-  deleteModMeta,
   deleteVariantMeta,
   syncModMetaIdentity,
   ensureModMeta,
@@ -50,9 +57,23 @@ export class WorkspaceStore {
   /** 短时间内的重复 refresh 合并为一次磁盘扫描 */
   static readonly REFRESH_DEBOUNCE_MS = 3_000;
 
+  /** In-memory only: variants with a queued or running job. Never persisted, so a crash cannot leave them stuck. */
+  private readonly activity = new Map<string, { state: "queued" | "running"; kind: JobKind; jobId: string }>();
+
   constructor() {
     this.data = this.load();
-    this.modsCache = syncWorkspaceFromDisk(this);
+    this.modsCache = this.withStatus(syncWorkspaceFromDisk(this));
+  }
+
+  private withStatus(mods: ManagedMod[]): ManagedMod[] {
+    for (const mod of mods) {
+      for (const variant of mod.variants) {
+        const active = this.activity.get(variant.id);
+        variant.status = variantStatusOf(variant.lastResult, active, variant.buildStatus);
+        if (active) variant.buildStatus = active.state === "running" && active.kind === "run" ? "running" : "building";
+      }
+    }
+    return mods;
   }
 
   private load(): WorkspaceData {
@@ -102,7 +123,7 @@ export class WorkspaceStore {
       return this.modsCache;
     }
     this.lastRefreshAt = now;
-    this.modsCache = syncWorkspaceFromDisk(this);
+    this.modsCache = this.withStatus(syncWorkspaceFromDisk(this));
     return this.modsCache;
   }
 
@@ -337,24 +358,115 @@ export class WorkspaceStore {
     return { ...variant, id: meta.id, createdAt: now };
   }
 
+  /**
+   * Legacy status update. "building"/"running" only mark the variant busy in memory; final states are
+   * written to .dmcl/variant.json. Prefer setVariantActivity + recordVariantResult.
+   */
   updateVariantBuildStatus(
     variantId: string,
     buildStatus: BuildStatus,
-    modVersion?: string,
+    _modVersion?: string,
   ): void {
     const found = this.getVariant(variantId);
     if (!found) return;
-
+    if (buildStatus === "building" || buildStatus === "running") {
+      const previous = this.activity.get(variantId);
+      this.activity.set(variantId, {
+        state: buildStatus === "running" ? "running" : "queued",
+        kind: previous?.kind ?? "build",
+        jobId: previous?.jobId ?? "",
+      });
+      this.applyStatus(variantId);
+      return;
+    }
+    this.activity.delete(variantId);
     const meta = readVariantMeta(found.variant.projectPath) ?? ensureVariantMeta(
       found.variant.projectPath,
       found.variant.source,
     );
+    if (meta.buildStatus === buildStatus && buildStatus === "unknown") {
+      this.applyStatus(variantId);
+      return;
+    }
     meta.buildStatus = buildStatus;
-    if (buildStatus === "success" || buildStatus === "failed") {
-      meta.lastBuiltAt = new Date().toISOString();
+    const at = new Date().toISOString();
+    if (buildStatus === "success" || buildStatus === "failed") meta.lastBuiltAt = at;
+    if (buildStatus === "success" || buildStatus === "failed" || buildStatus === "cancelled") {
+      // Keep the status object in step with legacy callers (batch verification, wizard registration).
+      meta.lastResult = {
+        kind: "build",
+        state: buildStatus === "success" ? "succeeded" : buildStatus,
+        at,
+        reason: null,
+        phaseReached: null,
+      };
     }
     writeVariantMeta(found.variant.projectPath, meta);
     this.refresh({ force: true });
+    invalidateMatrixCache(found.mod.id);
+  }
+
+  /** Marks a variant as having a queued/running job (null clears it). Memory only. */
+  setVariantActivity(
+    variantId: string,
+    activity: { state: "queued" | "running"; kind: JobKind; jobId: string } | null,
+  ): void {
+    if (activity) this.activity.set(variantId, activity);
+    else this.activity.delete(variantId);
+    this.applyStatus(variantId);
+  }
+
+  /** Persists how a job ended and clears the variant's active state. */
+  recordVariantResult(variantId: string, result: VariantResult): void {
+    this.activity.delete(variantId);
+    const found = this.getVariant(variantId);
+    if (!found) return;
+    const meta = readVariantMeta(found.variant.projectPath) ?? ensureVariantMeta(
+      found.variant.projectPath,
+      found.variant.source,
+    );
+    meta.lastResult = result;
+    meta.buildStatus = result.state === "succeeded" ? "success" : result.state === "failed" ? "failed" : "cancelled";
+    if (result.state !== "cancelled") meta.lastBuiltAt = result.at;
+    writeVariantMeta(found.variant.projectPath, meta);
+    this.refresh({ force: true });
+    invalidateMatrixCache(found.mod.id);
+  }
+
+  /**
+   * At startup nothing can be running: statuses an older DMCL persisted as "building"/"running"
+   * (or left behind by a crash) become "cancelled" with a reason.
+   */
+  resetInterruptedStatuses(): number {
+    this.activity.clear();
+    let reset = 0;
+    for (const mod of this.modsCache) {
+      for (const variant of mod.variants) {
+        const meta = readVariantMeta(variant.projectPath);
+        if (!meta || (meta.buildStatus !== "building" && meta.buildStatus !== "running")) continue;
+        meta.buildStatus = "cancelled";
+        meta.lastResult = {
+          kind: meta.lastResult?.kind ?? "build",
+          state: "cancelled",
+          at: new Date().toISOString(),
+          reason: "DMCL 上次退出时任务被中断",
+          phaseReached: meta.lastResult?.phaseReached ?? null,
+        };
+        writeVariantMeta(variant.projectPath, meta);
+        reset++;
+      }
+    }
+    if (reset > 0) {
+      this.refresh({ force: true });
+      invalidateMatrixCache();
+    }
+    return reset;
+  }
+
+  private applyStatus(variantId: string): void {
+    const found = this.getVariant(variantId);
+    if (!found) return;
+    this.withStatus([found.mod]);
     invalidateMatrixCache(found.mod.id);
   }
 
@@ -377,6 +489,10 @@ export class WorkspaceStore {
     return this.getMod(id);
   }
 
+  /**
+   * Removes the mod from DMCL's list: its variant folders are excluded from scanning and their registration
+   * (`.dmcl/variant.json`) is forgotten. Project files, other `.dmcl/` data and `dmcl.mod.json` stay on disk.
+   */
   removeMod(id: string): boolean {
     const mod = this.getMod(id);
     if (!mod) return false;
@@ -384,25 +500,18 @@ export class WorkspaceStore {
       this.addExcludedPath(v.projectPath);
       deleteVariantMeta(v.projectPath);
     }
-    const modDir = mod.variants[0] ? inferModDir(mod.variants[0].projectPath, mod.modId) : null;
-    if (modDir) deleteModMeta(modDir);
     invalidateMatrixCache(id);
     this.refresh({ force: true });
     return true;
   }
 
+  /** Removes one variant from DMCL's list; see removeMod for what stays on disk. */
   removeVariant(modUuid: string, variantId: string): boolean {
     const found = this.getVariant(variantId);
     if (!found || found.mod.id !== modUuid) return false;
 
     this.addExcludedPath(found.variant.projectPath);
     deleteVariantMeta(found.variant.projectPath);
-    const modDir = inferModDir(found.variant.projectPath, found.mod.modId);
-    const modMeta = readModMeta(modDir);
-    if (modMeta) {
-      modMeta.updatedAt = new Date().toISOString();
-      writeModMeta(modDir, modMeta);
-    }
     invalidateMatrixCache(found.mod.id);
     this.refresh({ force: true });
     return true;
@@ -438,6 +547,39 @@ export class WorkspaceStore {
   setVariantPathMissing(_variantId: string, _missing: boolean): void {
     // 已改为纯磁盘扫描，不再标记 pathMissing
   }
+}
+
+/** Active job first, else the last persisted result (legacy buildStatus when there is none). */
+export function variantStatusOf(
+  lastResult: VariantResult | undefined,
+  active: { state: "queued" | "running"; kind: JobKind; jobId: string } | undefined,
+  legacy?: BuildStatus,
+): VariantStatus {
+  if (active) {
+    return {
+      state: active.state,
+      kind: active.kind,
+      at: null,
+      reason: null,
+      phaseReached: lastResult?.phaseReached ?? null,
+      activeJobId: active.jobId || null,
+    };
+  }
+  if (lastResult) {
+    return {
+      state: lastResult.state,
+      kind: lastResult.kind,
+      at: lastResult.at,
+      reason: lastResult.reason,
+      phaseReached: lastResult.phaseReached,
+      activeJobId: null,
+    };
+  }
+  const legacyState: VariantStatus["state"] = legacy === "success" ? "succeeded"
+    : legacy === "failed" ? "failed"
+    : legacy === "cancelled" ? "cancelled"
+    : "unknown";
+  return { state: legacyState, kind: null, at: null, reason: null, phaseReached: null, activeJobId: null };
 }
 
 let singleton: WorkspaceStore | null = null;

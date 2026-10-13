@@ -16,6 +16,7 @@ import {
   prewarmForgeSlimeLauncherAssets,
 } from "../core/forge-mavenizer.js";
 import { ensureProjectToolchain } from "../core/toolchain.js";
+import { readPropertiesFile } from "../core/properties.js";
 import { withGradleBuildSlot, recommendGradleBuildConcurrency } from "../core/concurrency.js";
 import { scaffoldProject, pascalCase } from "../core/scaffold.js";
 import { applyVerificationFixes } from "./verification-fix.js";
@@ -738,14 +739,7 @@ export async function verifyExistingProject(
 
   const detected = detectProject(projectPath);
   if (detected && loader === "forge") {
-    const props: Record<string, string> = {};
-    const propsFile = path.join(projectPath, "gradle.properties");
-    if (fs.existsSync(propsFile)) {
-      for (const line of fs.readFileSync(propsFile, "utf8").split("\n")) {
-        const m = line.match(/^\s*([^#=\s]+)\s*=\s*(.*)$/);
-        if (m) props[m[1]] = m[2].trim();
-      }
-    }
+    const props = readPropertiesFile(path.join(projectPath, "gradle.properties"));
     await repairCrossLoaderProject(
       projectPath,
       props.mod_id ?? detected.modId,
