@@ -5,7 +5,7 @@ import { parseHostActivity, parseJob, variantStatusOf, type JobInfo } from "../g
 import { formatDuration, humanTime, shortPath, statusView, STALE_FAILURE_MS } from "../gui/renderer-src/status";
 import { PhaseTimeline, buildStepper, currentStepIndex, inferPhaseFromLine, totalElapsed } from "../gui/renderer-src/phases";
 import { LogBuffer, classifyLine, extractErrorHighlights, isAtBottom, visibleRange } from "../gui/renderer-src/log-buffer";
-import { busyWarningText, hostChipView, progressText, shouldWarnBeforeLaunch } from "../gui/renderer-src/host-activity";
+import { busyWarningText, hostChipView, jobTitle, progressText, shouldWarnBeforeLaunch } from "../gui/renderer-src/host-activity";
 import { openJobFeed, resetJobsApiProbe, jobsApiSupport } from "../gui/renderer-src/job-feed";
 
 const NOW = Date.parse("2026-10-13T12:00:00Z");
@@ -266,6 +266,17 @@ describe("host activity", () => {
     assert.equal(progressText(0.25), "25%");
     assert.equal(progressText("3/9"), "3/9");
     assert.equal(progressText(null), null);
+  });
+
+  it("names recorded Linker command lines briefly", () => {
+    const job = (label: string) => ({ kind: "instance-test", label, pid: 1, startedAt: NOW, progress: null, source: "linker" as const });
+    assert.equal(jobTitle(job("minecraft_variants regress --profile smoke --output build/tasks/release-1.0.4/regress-smoke-2")), "回归 · smoke");
+    assert.equal(jobTitle(job("minecraft_variants accept --variant fabric-1.21.1 --scenario world-import --artifacts reuse --output D:/x/y")), "验收 · fabric-1.21.1 · world-import");
+    assert.equal(jobTitle(job("instance_test run world-import --preset world-import-wide-atlas --artifacts reuse")), "实例测试 · world-import");
+    assert.equal(jobTitle(job("minecraft_variants build-all --tests --jobs 4 --output D:/a/b")), "构建全部变体");
+    assert.equal(jobTitle(job("remove_task_tree D:/dcml/worktrees/linker-x")), "清理任务目录");
+    assert.equal(jobTitle(job("npm build")), "npm build");
+    assert.equal(jobTitle(job("some_tool D:/very/long/path/that/goes/on/and/on --flag 1")), "some_tool");
   });
 
   it("shows a chip for Linker tests", () => {

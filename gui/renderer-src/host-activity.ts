@@ -31,9 +31,35 @@ export function sourceLabel(job: HostJob): string {
   return "其他任务";
 }
 
+/** Short readable name for a recorded job: Linker records whole command lines, flags and paths included. */
+export function jobTitle(job: HostJob): string {
+  const raw = (job.label || job.kind || "").trim();
+  const words = raw.split(/\s+/);
+  const option = (name: string): string | null => {
+    const at = words.indexOf("--" + name);
+    return at >= 0 && at + 1 < words.length && !words[at + 1].startsWith("--") ? words[at + 1] : null;
+  };
+  const [tool, command, subject] = words;
+  const parts = (...items: (string | null | undefined)[]) => items.filter(Boolean).join(" · ");
+  if (tool === "minecraft_variants") {
+    if (command === "regress") return parts("回归", option("profile"));
+    if (command === "accept") return parts("验收", option("variant"), option("scenario"));
+    if (command === "build-all") return "构建全部变体";
+    if (command === "freeze") return parts("冻结构建", option("variant"));
+  }
+  if (tool === "instance_test" && command) return parts("实例测试", subject && !subject.startsWith("--") ? subject : null);
+  if (tool === "remove_task_tree") return "清理任务目录";
+  if (raw.startsWith("verify_changed")) return "合并前检查";
+  // Anything else: the words before the first flag, without long paths.
+  const firstFlag = words.findIndex((word) => word.startsWith("--"));
+  const head = (firstFlag >= 0 ? words.slice(0, firstFlag) : words).filter((word) => !/[\\/]/.test(word) || word.length < 24);
+  const text = head.join(" ") || raw;
+  return text.length > 48 ? text.slice(0, 47) + "…" : text;
+}
+
 function jobSummary(job: HostJob): string {
   const progress = progressText(job.progress);
-  return [job.label || job.kind, progress].filter(Boolean).join(" ");
+  return [jobTitle(job), progress].filter(Boolean).join(" ");
 }
 
 export interface ChipView {
@@ -183,7 +209,7 @@ export class HostActivityMonitor {
           const started = toMillis(j.startedAt ?? null);
           const progress = progressText(j.progress);
           return '<li><span class="host-job-source source-' + esc(j.source) + '">' + esc(sourceLabel(j)) + '</span>' +
-            '<span class="host-job-label">' + esc(j.label || j.kind) + '</span>' +
+            '<span class="host-job-label" title="' + esc(j.label || j.kind) + '">' + esc(jobTitle(j)) + '</span>' +
             '<span class="host-job-meta">' + esc([progress, started !== null ? "已运行 " + formatDuration(now - started) : null, j.pid ? "PID " + j.pid : null].filter(Boolean).join(" · ")) + '</span></li>';
         }).join("") + "</ul>"
         : '<p class="host-popover-empty">主机繁忙，但没有任务详情。</p>');
