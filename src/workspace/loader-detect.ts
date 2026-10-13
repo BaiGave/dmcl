@@ -2,16 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import type { LoaderId } from "../types.js";
 import { readBuildScripts } from "../core/build-script.js";
+import { readPropertiesFile } from "../core/properties.js";
 
-function readProps(file: string): Record<string, string> {
-  if (!fs.existsSync(file)) return {};
-  const out: Record<string, string> = {};
-  for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
-    const m = line.match(/^\s*([^#=\s]+)\s*=\s*(.*)$/);
-    if (m) out[m[1]] = m[2].trim();
-  }
-  return out;
-}
+const readProps = readPropertiesFile;
 
 /**
  * 判断项目的加载器，工作区、工具链与源码准备共用这一处。

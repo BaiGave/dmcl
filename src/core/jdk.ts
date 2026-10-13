@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import AdmZip from "adm-zip";
 import { readBuildScripts, resolveGradleValue } from "./build-script.js";
+import { readPropertiesFile } from "./properties.js";
 import { fetchJson, UA } from "./http.js";
 import { readToolchainMetadata } from "./toolchain-metadata.js";
 
@@ -76,12 +77,44 @@ export function detectJavaMajor(): number | null {
   }
 }
 
-/** 检测指定 JAVA_HOME 下 java 的主版本号 */
+/** `JAVA_VERSION="21.0.5"` / `"1.8.0_402"` from a JDK's `release` file → 21 / 8 */
+export function parseReleaseJavaMajor(release: string): number | null {
+  const m = release.match(/^JAVA_VERSION="?(\d+)(?:\.(\d+))?/m);
+  if (!m) return null;
+  const major = Number(m[1]);
+  return major === 1 ? Number(m[2] ?? 0) : major;
+}
+
+const javaMajorCache = new Map<string, { stamp: string; major: number | null }>();
+
+/**
+ * 检测指定 JAVA_HOME 下 java 的主版本号。先读 JDK 的 `release` 文件（无需启动 JVM），
+ * 读不到再执行 `java -version`；结果按目录与 java 可执行文件的修改时间缓存。
+ */
 export function detectJavaMajorAt(javaHome: string): number | null {
-  const bin = process.platform === "win32"
-    ? path.join(javaHome, "bin", "java.exe")
-    : path.join(javaHome, "bin", "java");
-  if (!fs.existsSync(bin)) return null;
+  const bin = javaBinary(javaHome);
+  let stamp: string;
+  try {
+    const stat = fs.statSync(bin);
+    stamp = `${stat.mtimeMs}:${stat.size}`;
+  } catch {
+    return null;
+  }
+  const key = path.resolve(javaHome).toLowerCase();
+  const cached = javaMajorCache.get(key);
+  if (cached && cached.stamp === stamp) return cached.major;
+  let major: number | null = null;
+  try {
+    major = parseReleaseJavaMajor(fs.readFileSync(path.join(javaHome, "release"), "utf8"));
+  } catch {
+    major = null;
+  }
+  major ??= spawnJavaVersion(bin);
+  javaMajorCache.set(key, { stamp, major });
+  return major;
+}
+
+function spawnJavaVersion(bin: string): number | null {
   try {
     const res = spawnSync(bin, ["-version"], { encoding: "utf8", timeout: 15_000 });
     const out = `${res.stderr ?? ""}${res.stdout ?? ""}`;
@@ -96,16 +129,7 @@ export function detectJavaMajorAt(javaHome: string): number | null {
 
 /** 项目 gradle.properties 自己配置的 org.gradle.java.home */
 function readGradlePropertiesJavaHome(targetDir: string): string | null {
-  try {
-    const propsFile = path.join(targetDir, "gradle.properties");
-    if (!fs.existsSync(propsFile)) return null;
-    const content = fs.readFileSync(propsFile, "utf8");
-    const m = content.match(/^[ \t]*org\.gradle\.java\.home[ \t]*=[ \t]*(.+)$/m);
-    if (!m) return null;
-    return m[1].trim().replace(/\\\\/g, "\\").replace(/\\:/g, ":");
-  } catch {
-    return null;
-  }
+  return readGradleProps(targetDir)["org.gradle.java.home"]?.trim() || null;
 }
 
 /** DMCL 在 .dmcl/toolchain.json 记录的 JDK；目录中已没有 java 时视为未记录 */
@@ -133,24 +157,35 @@ export function effectiveJvmMajor(targetDir: string): number | null {
   return detectJavaMajor();
 }
 
-function readGradleProps(targetDir: string): Record<string, string> {
-  const file = path.join(targetDir, "gradle.properties");
-  if (!fs.existsSync(file)) return {};
-  const out: Record<string, string> = {};
-  for (const line of fs.readFileSync(file, "utf8").split("\n")) {
-    const m = line.match(/^\s*([^#=\s]+)\s*=\s*(.*)$/);
-    if (m) out[m[1]] = m[2].trim();
-  }
-  return out;
+/** 项目 gradle.properties（统一的 .properties 解析，兼容 CRLF） */
+export function readGradleProps(targetDir: string): Record<string, string> {
+  return readPropertiesFile(path.join(targetDir, "gradle.properties"));
 }
 
-/** 从 gradle-wrapper.properties 解析 Gradle 版本 */
+/** 从 gradle-wrapper.properties 的 distributionUrl 解析 Gradle 版本 */
 export function readGradleVersion(targetDir: string): string | null {
-  const file = path.join(targetDir, "gradle", "wrapper", "gradle-wrapper.properties");
-  if (!fs.existsSync(file)) return null;
-  const content = fs.readFileSync(file, "utf8");
-  const m = content.match(/gradle-(\d+(?:\.\d+)+)-(?:bin|all)\.zip/);
+  const props = readPropertiesFile(path.join(targetDir, "gradle", "wrapper", "gradle-wrapper.properties"));
+  const m = (props.distributionUrl ?? "").match(/gradle-(\d+(?:\.\d+)+(?:-[\w.]+?)?)-(?:bin|all)\.zip/);
   return m?.[1] ?? null;
+}
+
+/** `gradle/gradle-daemon-jvm.properties` 声明的守护进程 JVM 条件（Gradle 8.8+ 生效） */
+export interface DaemonJvmCriteria {
+  toolchainVersion: number;
+  vendor?: string;
+}
+
+export function readDaemonJvmCriteria(targetDir: string): DaemonJvmCriteria | null {
+  const props = readPropertiesFile(path.join(targetDir, "gradle", "gradle-daemon-jvm.properties"));
+  const version = Number.parseInt(props.toolchainVersion ?? "", 10);
+  if (!Number.isFinite(version) || version <= 0) return null;
+  return props.toolchainVendor ? { toolchainVersion: version, vendor: props.toolchainVendor } : { toolchainVersion: version };
+}
+
+function gradleHonorsDaemonJvmCriteria(gradleVersion: string | null): boolean {
+  if (!gradleVersion) return true;
+  const [major = 0, minor = 0] = gradleVersion.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  return major > 8 || (major === 8 && minor >= 8);
 }
 
 /** 运行该 Gradle 版本所允许的 JVM 主版本范围 */
@@ -245,85 +280,103 @@ export function usesForgeGradleLegacy(targetDir: string): boolean {
 }
 
 /**
- * Gradle 进程应使用的 JDK 主版本。
- * 旧版 ForgeGradle 固定 Java 8；现代项目取 Gradle/Loom/MC 编译目标的最高需求。
+ * 项目 Gradle 进程的 JDK 需求：唯一的需求分析，构建、启动、源码准备与工具链记录都以此为准。
+ * - 旧版 ForgeGradle 固定 Java 8；
+ * - 项目声明了 `gradle/gradle-daemon-jvm.properties`（Gradle 8.8+）时，守护进程就跑在 toolchainVersion 上，
+ *   直接选这个版本，避免 Gradle 另找或另起 JVM；
+ * - 否则取 Gradle 运行下限、Loom 插件下限与 Minecraft 编译目标的最高值，上限是该 Gradle 能运行的最高 Java。
  */
-export function pickJdkMajor(mcVersion: string, targetDir: string): number {
-  const gradleVer = readGradleVersion(targetDir);
-  const range = gradleVer ? gradleJvmRange(gradleVer) : { min: 17, max: 25 };
-  if (usesForgeGradleLegacy(targetDir)) return 8;
-  const loomVer = readLoomVersion(targetDir);
-  const loomNeed = loomVer ? loomMinJvm(loomVer) : range.min;
-  const compileNeed = requiredJavaFor(mcVersion);
-  return Math.max(range.min, loomNeed, compileNeed);
-}
-
-/** 当前 JVM 是否可运行该项目的 Gradle（含 Loom 插件要求） */
-export function isJvmCompatible(targetDir: string): boolean {
-  const major = effectiveJvmMajor(targetDir);
-  if (major === null) return false;
-  const gradleVer = readGradleVersion(targetDir) ?? "8.0";
-  const range = gradleJvmRange(gradleVer);
-  if (major < range.min || major > range.max) return false;
-  const mcVersion = readMcVersionFromProject(targetDir);
-  if (mcVersion && !usesForgeGradleLegacy(targetDir) && major < requiredJavaFor(mcVersion)) return false;
-  const loomVer = readLoomVersion(targetDir);
-  if (loomVer && major < loomMinJvm(loomVer)) return false;
-  return true;
-}
-
-/**
- * 分析项目构建所需的 JDK 主版本及原因（不检测系统 Java）。
- */
-export function resolveProjectJdkNeed(
-  targetDir: string,
-  mcVersion: string,
-): {
+export interface JdkNeed {
+  /** 应传给 Gradle 的 JDK 主版本 */
   major: number;
+  /** 可接受的 Gradle JVM 主版本范围（含两端） */
+  minMajor: number;
+  maxMajor: number;
+  compileMajor: number;
   gradleVersion: string | null;
   loomVersion: string | null;
+  daemonJvm: DaemonJvmCriteria | null;
+  legacyForge: boolean;
   summary: string;
   incompatibleReason?: string;
-} {
-  const major = pickJdkMajor(mcVersion, targetDir);
+}
+
+export function analyzeJdkNeed(targetDir: string, mcVersion: string): JdkNeed {
   const gradleVersion = readGradleVersion(targetDir);
-  const loomVersion = readLoomVersion(targetDir);
-  const compileNeed = usesForgeGradleLegacy(targetDir) ? 8 : requiredJavaFor(mcVersion);
   const range = gradleVersion ? gradleJvmRange(gradleVersion) : { min: 17, max: 25 };
+  const legacyForge = usesForgeGradleLegacy(targetDir);
+  const loomVersion = readLoomVersion(targetDir);
+  const compileMajor = legacyForge ? 8 : requiredJavaFor(mcVersion);
+  const daemonJvm = gradleHonorsDaemonJvmCriteria(gradleVersion) ? readDaemonJvmCriteria(targetDir) : null;
+
   const bits: string[] = [];
   if (gradleVersion) bits.push(`Gradle ${gradleVersion}`);
   if (loomVersion) bits.push(`Loom ${loomVersion}`);
-  bits.push(`Minecraft ${mcVersion} -> Java ${compileNeed}`);
-  const summary = bits.length > 0 ? bits.join(" + ") : "项目工具链";
-  const incompatibleReason = major > range.max
-    ? `Gradle ${gradleVersion ?? "unknown"} supports running up to Java ${range.max}, but Minecraft ${mcVersion} needs Java ${compileNeed}`
-    : undefined;
-  return { major, gradleVersion, loomVersion, summary, incompatibleReason };
+  bits.push(`Minecraft ${mcVersion} -> Java ${compileMajor}`);
+  if (daemonJvm) bits.push(`gradle-daemon-jvm.properties -> Java ${daemonJvm.toolchainVersion}`);
+  const summary = bits.join(" + ");
+
+  if (legacyForge) {
+    return { major: 8, minMajor: 8, maxMajor: 8, compileMajor, gradleVersion, loomVersion, daemonJvm, legacyForge, summary };
+  }
+
+  const loomNeed = loomVersion ? loomMinJvm(loomVersion) : range.min;
+  const computed = Math.max(range.min, loomNeed, compileMajor);
+  let incompatibleReason: string | undefined;
+  if (daemonJvm) {
+    const major = daemonJvm.toolchainVersion;
+    if (major > range.max) {
+      incompatibleReason = `Gradle ${gradleVersion ?? "unknown"} supports running up to Java ${range.max}, but gradle-daemon-jvm.properties asks for Java ${major}`;
+    } else if (major < computed) {
+      incompatibleReason = `gradle-daemon-jvm.properties asks for Java ${major}, but this build needs Java ${computed} or newer (${summary})`;
+    }
+    return {
+      major, minMajor: major, maxMajor: major, compileMajor, gradleVersion, loomVersion, daemonJvm, legacyForge, summary, incompatibleReason,
+    };
+  }
+  if (computed > range.max) {
+    incompatibleReason = `Gradle ${gradleVersion ?? "unknown"} supports running up to Java ${range.max}, but Minecraft ${mcVersion} needs Java ${compileMajor}`;
+  }
+  return {
+    major: computed, minMajor: computed, maxMajor: range.max, compileMajor, gradleVersion, loomVersion, daemonJvm, legacyForge, summary, incompatibleReason,
+  };
 }
 
-/** 项目当前的 JDK（见 readJavaHomeFromProject）是否可用且在兼容范围内 */
+/** JDK 主版本是否落在需求范围内 */
+export function jdkSatisfiesNeed(major: number | null, need: Pick<JdkNeed, "minMajor" | "maxMajor">): boolean {
+  return major !== null && major >= need.minMajor && major <= need.maxMajor;
+}
+
+/** Gradle 进程应使用的 JDK 主版本（见 analyzeJdkNeed） */
+export function pickJdkMajor(mcVersion: string, targetDir: string): number {
+  return analyzeJdkNeed(targetDir, mcVersion).major;
+}
+
+/** 当前 JVM 是否可运行该项目的 Gradle（含 Loom 插件与守护进程 JVM 要求） */
+export function isJvmCompatible(targetDir: string): boolean {
+  const mcVersion = readMcVersionFromProject(targetDir);
+  if (!mcVersion) return effectiveJvmMajor(targetDir) !== null;
+  return jdkSatisfiesNeed(effectiveJvmMajor(targetDir), analyzeJdkNeed(targetDir, mcVersion));
+}
+
+/** 分析项目构建所需的 JDK 主版本及原因（不检测系统 Java）；与 analyzeJdkNeed 相同 */
+export function resolveProjectJdkNeed(targetDir: string, mcVersion: string): JdkNeed {
+  return analyzeJdkNeed(targetDir, mcVersion);
+}
+
+/** 项目当前的 JDK（见 readJavaHomeFromProject）是否可用且满足需求 */
 export function projectJdkIsReady(
   targetDir: string,
   neededMajor: number,
   mcVersion?: string,
 ): boolean {
   const configured = readJavaHomeFromProject(targetDir);
-  if (!configured) return false;
-  const bin = process.platform === "win32"
-    ? path.join(configured, "bin", "java.exe")
-    : path.join(configured, "bin", "java");
-  if (!fs.existsSync(bin)) return false;
+  if (!configured || !fs.existsSync(javaBinary(configured))) return false;
   const major = detectJavaMajorAt(configured);
-  if (major === null || major < neededMajor) return false;
-  const gradleVer = readGradleVersion(targetDir);
-  const range = gradleVer ? gradleJvmRange(gradleVer) : { min: 17, max: 25 };
-  if (major > range.max) return false;
-  if (mcVersion && !usesForgeGradleLegacy(targetDir)) {
-    if (major < requiredJavaFor(mcVersion)) return false;
-  } else if (usesForgeGradleLegacy(targetDir) && major !== 8) {
-    return false;
-  }
-  return true;
+  const mc = mcVersion ?? readMcVersionFromProject(targetDir);
+  if (!mc) return major !== null && major >= neededMajor;
+  const need = analyzeJdkNeed(targetDir, mc);
+  return jdkSatisfiesNeed(major, { minMajor: Math.max(need.minMajor, neededMajor), maxMajor: need.maxMajor });
 }
 
 export interface ProjectJdkOptions extends JdkOptions {
@@ -332,8 +385,8 @@ export interface ProjectJdkOptions extends JdkOptions {
 }
 
 /**
- * 确保项目有可用的 DMCL 托管 JDK 并返回其目录：先分析需求，再查本地缓存，缺失则自动下载。
- * 不依赖用户系统是否已安装 Java；导入项目自己配置的 org.gradle.java.home 不可用时报错，不改写。
+ * 确保项目有满足需求的 JDK 并返回其目录（每次构建/启动都重新校验已记录的选择）。
+ * 不依赖用户系统是否已安装 Java；导入项目自己配置的 org.gradle.java.home 不满足时报错，不改写。
  */
 export async function ensureProjectJdk(
   targetDir: string,
@@ -341,44 +394,23 @@ export async function ensureProjectJdk(
   log: JdkLogger = () => {},
   options?: ProjectJdkOptions,
 ): Promise<string> {
-  throwIfCancelled(options);
-  const need = resolveProjectJdkNeed(targetDir, mcVersion);
-  log(`检查 JDK：此项目需要 Java ${need.major}（${need.summary}）`);
-
-  if (need.incompatibleReason) {
-    throw new Error(need.incompatibleReason);
-  }
-
+  const scaffoldWrite = options?.writeGradleProperties === true;
   const own = readGradlePropertiesJavaHome(targetDir);
-  // 脚手架项目以 gradle.properties 为准，缺失时补写；导入项目也沿用 DMCL 已记录的 JDK
-  const current = options?.writeGradleProperties ? own : readJavaHomeFromProject(targetDir);
-  if (current && projectJdkIsReady(targetDir, need.major, mcVersion)) {
-    const configuredMajor = detectJavaMajorAt(current);
-    log(`✔ 项目已配置 JDK ${configuredMajor ?? need.major}：${current}`);
-    return current;
+  if (scaffoldWrite && own) {
+    // 脚手架项目的 gradle.properties 由 DMCL 维护：不满足时换掉，而不是报错
+    const need = analyzeJdkNeed(targetDir, mcVersion);
+    if (need.incompatibleReason) throw new Error(need.incompatibleReason);
+    if (fs.existsSync(javaBinary(own)) && jdkSatisfiesNeed(detectJavaMajorAt(own), need)) {
+      log(`✔ 项目已配置 JDK ${detectJavaMajorAt(own) ?? need.major}：${own}`);
+      return own;
+    }
   }
-
-  if (own && !options?.writeGradleProperties) {
-    throw new Error(
-      `项目 gradle.properties 配置的 org.gradle.java.home 不满足 Java ${need.major}（${need.summary}）：${own}；`
-      + "DMCL 不改写导入项目的 gradle.properties，请调整或删除这一行，DMCL 会在启动 Gradle 时传入所选 JDK",
-    );
-  }
-
-  let jdkPath = findCachedJdk(need.major);
-  if (jdkPath) {
-    log(`使用 DMCL 已缓存的 JDK ${need.major}：${jdkPath}`);
-  } else {
-    throwIfCancelled(options);
-    log(`未检测到 JDK ${need.major}，开始自动下载（无需事先安装 Java）…`);
-    jdkPath = await ensureJdkInCache(need.major, log, options);
-    throwIfCancelled(options);
-  }
-  if (options?.writeGradleProperties) {
-    await injectJdkHome(targetDir, jdkPath);
+  const chosen = await selectBuildJdk(targetDir, mcVersion, log, options ?? {}, { ignoreProjectProperty: scaffoldWrite });
+  if (scaffoldWrite && chosen.javaHome !== own) {
+    await injectJdkHome(targetDir, chosen.javaHome);
     log("已写入 org.gradle.java.home");
   }
-  return jdkPath;
+  return chosen.javaHome;
 }
 
 export interface BuildJdkOptions extends JdkOptions {
@@ -390,7 +422,7 @@ export interface BuildJdkOptions extends JdkOptions {
 
 export interface BuildJdk {
   javaHome: string;
-  /** `java -version` 报告的主版本；无法执行检测时为 null */
+  /** JDK 报告的主版本；无法检测时为 null */
   major: number | null;
   origin: "project" | "requested" | "dmcl";
 }
@@ -402,8 +434,7 @@ function javaBinary(javaHome: string): string {
 /**
  * 为一次 Gradle 调用选择 JDK，只返回路径，不写入项目文件，也不记录选择。
  * 项目 gradle.properties 已配置 org.gradle.java.home 时原样沿用，不满足构建需求就报错而不是覆盖；
- * 否则沿用 DMCL 记录且仍满足需求的 JDK，再取调用方指定的 JDK，最后取 DMCL 缓存或自动下载的、
- * 满足 Gradle/Loom/Minecraft 需求的 JDK。
+ * 否则沿用 DMCL 记录且仍满足需求的 JDK，再取调用方指定的 JDK，最后取 DMCL 缓存或自动下载的 JDK。
  */
 export async function resolveBuildJdk(
   targetDir: string,
@@ -411,26 +442,33 @@ export async function resolveBuildJdk(
   log: JdkLogger = () => {},
   options: BuildJdkOptions = {},
 ): Promise<BuildJdk> {
+  return selectBuildJdk(targetDir, mcVersion, log, options, { ignoreProjectProperty: false });
+}
+
+async function selectBuildJdk(
+  targetDir: string,
+  mcVersion: string,
+  log: JdkLogger,
+  options: BuildJdkOptions,
+  mode: { ignoreProjectProperty: boolean },
+): Promise<BuildJdk> {
   throwIfCancelled(options);
-  const need = resolveProjectJdkNeed(targetDir, mcVersion);
+  const need = analyzeJdkNeed(targetDir, mcVersion);
   log(`检查 JDK：此构建需要 Java ${need.major}（${need.summary}）`);
   if (need.incompatibleReason) throw new Error(need.incompatibleReason);
 
-  const gradleVersion = readGradleVersion(targetDir);
-  const maxMajor = gradleVersion ? gradleJvmRange(gradleVersion).max : 25;
-  const legacyForge = usesForgeGradleLegacy(targetDir);
+  const allowed = need.minMajor === need.maxMajor ? `Java ${need.major}` : `Java ${need.minMajor}–${need.maxMajor}`;
   const accept = (javaHome: string, origin: BuildJdk["origin"], label: string): BuildJdk => {
-    if (!fs.existsSync(javaBinary(javaHome))) throw new Error(`${label}不存在 java：${javaHome}`);
+    const hint = origin === "project" ? "；DMCL 不改写导入项目的 gradle.properties，请自行调整或删除这一行" : "";
+    if (!fs.existsSync(javaBinary(javaHome))) throw new Error(`${label}不存在 java：${javaHome}${hint}`);
     const major = detectJavaMajorAt(javaHome);
-    if (major !== null && (major < need.major || major > maxMajor || (legacyForge && major !== 8))) {
-      const allowed = legacyForge ? "Java 8" : `Java ${need.major}–${maxMajor}`;
-      const hint = origin === "project" ? "；DMCL 不会改写项目的这项配置，请自行调整或移除" : "";
+    if (major !== null && !jdkSatisfiesNeed(major, need)) {
       throw new Error(`${label}是 Java ${major}，此构建需要 ${allowed}（${need.summary}）：${javaHome}${hint}`);
     }
     return { javaHome, major, origin };
   };
 
-  const configured = readGradlePropertiesJavaHome(targetDir);
+  const configured = mode.ignoreProjectProperty ? null : readGradlePropertiesJavaHome(targetDir);
   if (configured) {
     const chosen = accept(configured, "project", "项目 gradle.properties 配置的 org.gradle.java.home ");
     log(`沿用项目配置的 JDK ${chosen.major ?? "?"}：${configured}`);
@@ -461,6 +499,7 @@ export async function resolveBuildJdk(
   if (options.download === false) throw new Error(`没有可用的 Java ${need.major}，且未启用自动下载`);
   log(`未检测到 JDK ${need.major}，开始自动下载（无需事先安装 Java）…`);
   const downloaded = await ensureJdkInCache(need.major, log, options);
+  throwIfCancelled(options);
   return { javaHome: downloaded, major: need.major, origin: "dmcl" };
 }
 

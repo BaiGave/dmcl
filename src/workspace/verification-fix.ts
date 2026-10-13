@@ -1,9 +1,8 @@
-import fs from "node:fs";
-import path from "node:path";
 import type { LoaderId, Logger } from "../types.js";
 import { ensureProjectToolchain } from "../core/toolchain.js";
 import { detectProject } from "./detect.js";
 import { repairCrossLoaderProject } from "./cross-loader.js";
+import { readGradleProps } from "../core/jdk.js";
 import {
   prewarmForgeMavenizerLibraries,
   prewarmForgeMavenizerMcpTools,
@@ -36,16 +35,6 @@ export interface VerificationFixPlan {
   notes: string[];
 }
 
-function readGradleProps(targetDir: string): Record<string, string> {
-  const file = path.join(targetDir, "gradle.properties");
-  if (!fs.existsSync(file)) return {};
-  const out: Record<string, string> = {};
-  for (const line of fs.readFileSync(file, "utf8").split("\n")) {
-    const m = line.match(/^\s*([^#=\s]+)\s*=\s*(.*)$/);
-    if (m) out[m[1]] = m[2].trim();
-  }
-  return out;
-}
 
 /** 根据失败日志规划可尝试的自动修复项（纯分析，便于测试） */
 export function planVerificationFixes(

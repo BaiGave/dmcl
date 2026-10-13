@@ -45,9 +45,8 @@ export function isLegacyForgeByMcVersion(mcVersion: string): boolean {
 
 function fabricLoomHint(mcVersion: string): string | undefined {
   if (isUnobfuscatedMc(mcVersion)) return "1.16-SNAPSHOT";
-  if (compareMcVersions(mcVersion, "1.21") >= 0) return "1.10-SNAPSHOT";
-  if (compareMcVersions(mcVersion, "1.20.5") >= 0) return "1.8-SNAPSHOT";
-  if (compareMcVersions(mcVersion, "1.20") >= 0) return "1.6-SNAPSHOT";
+  // Fabric templates for 1.20+ use a current Loom (1.7+), which itself needs Java 21 even when the game targets 17.
+  if (compareMcVersions(mcVersion, "1.20") >= 0) return "1.10-SNAPSHOT";
   if (compareMcVersions(mcVersion, "1.19") >= 0) return "1.4-SNAPSHOT";
   return "1.0-SNAPSHOT";
 }
@@ -86,13 +85,15 @@ export function recommendedGradleVersion(loader: LoaderId, mcVersion: string): s
  */
 export function resolveVersionToolchain(loader: LoaderId, mcVersion: string): VersionToolchainSpec {
   const legacyForgeGradle = loader === "forge" && isLegacyForgeByMcVersion(mcVersion);
-  const compileJavaMajor = legacyForgeGradle ? 8 : requiredJavaFor(mcVersion);
+  // ForgeGradle 2–5 (MC before 1.17) runs on Java 8; FG 6 for 1.17–1.20.1 is "legacy" syntax but needs Java 17.
+  const java8ForgeGradle = legacyForgeGradle && compareMcVersions(mcVersion, "1.17") < 0;
+  const compileJavaMajor = java8ForgeGradle ? 8 : requiredJavaFor(mcVersion);
   const gradleVersion = recommendedGradleVersion(loader, mcVersion);
   const minimumGradleVersion = minimumGradleForJvm(compileJavaMajor);
   const gradleRange = gradleJvmRange(gradleVersion);
 
   let gradleRuntimeJdkMajor = compileJavaMajor;
-  if (legacyForgeGradle) {
+  if (java8ForgeGradle) {
     gradleRuntimeJdkMajor = 8;
   } else if (loader === "fabric") {
     const loomHint = fabricLoomHint(mcVersion);

@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { detectProject } from "../src/workspace/detect.js";
+import { readPropertiesFile } from "../src/core/properties.js";
 import { repairCrossLoaderProject } from "../src/workspace/cross-loader.js";
 import { runGradleBuildTask } from "../src/core/gradle.js";
 import { ensureProjectToolchain } from "../src/core/toolchain.js";
@@ -14,15 +15,7 @@ import { setProjectsRoot, getProjectsRoot } from "../src/workspace/paths.js";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 setProjectsRoot(path.join(repoRoot, "projects"));
 
-function readProps(file: string): Record<string, string> {
-  if (!fs.existsSync(file)) return {};
-  const out: Record<string, string> = {};
-  for (const line of fs.readFileSync(file, "utf8").split("\n")) {
-    const m = line.match(/^\s*([^#=\s]+)\s*=\s*(.*)$/);
-    if (m) out[m[1]] = m[2].trim();
-  }
-  return out;
-}
+const readProps = readPropertiesFile;
 
 function findProjects(): string[] {
   const root = getProjectsRoot();
