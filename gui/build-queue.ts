@@ -96,7 +96,8 @@ export interface VariantStatusSink {
 
 const LOG_LINE_LIMIT = 20_000;
 const LOG_PAGE_LIMIT = 2_000;
-const FINISHED_JOB_LIMIT = 100;
+/** Finished jobs whose log stays in memory; older ones serve their log from the saved file. */
+const FINISHED_IN_MEMORY_LOGS = 30;
 
 interface JobRecord {
   job: BuildJob;
@@ -113,6 +114,11 @@ interface JobRecord {
   timeToTitleMs: number | null;
   javaMajor: number | null;
   cancelRequested: boolean;
+  /** Saved log file; once the in-memory lines are evicted, /log reads from it. */
+  savedLogPath: string | null;
+  logEvicted: boolean;
+  /** Total line count, kept when the in-memory lines are evicted. */
+  evictedLineCount: number;
 }
 
 const jobs = new Map<string, JobRecord>();
@@ -212,7 +218,7 @@ function toView(record: JobRecord): JobView {
     phaseStartedAt: iso(record.phaseStartedAt),
     finishedAt: record.finishedAt === null ? null : iso(record.finishedAt),
     reason: record.reason,
-    logLineCount: record.logBase + record.lines.length,
+    logLineCount: record.logEvicted ? record.evictedLineCount : record.logBase + record.lines.length,
     label: variantJobLabel(job),
     loader: job.loader ?? null,
     mcVersion: job.mcVersion ?? null,
@@ -259,6 +265,18 @@ export function listJobs(): JobView[] {
 export function getJobLog(jobId: string, from = 0): { lines: string[]; next: number; done: boolean } | null {
   const record = jobs.get(jobId);
   if (!record) return null;
+  if (record.logEvicted) {
+    let all: string[] = [];
+    try {
+      all = record.savedLogPath ? fs.readFileSync(record.savedLogPath, "utf8").split("\n") : [];
+    } catch {
+      all = [];
+    }
+    const begin = Math.max(0, Math.floor(Number.isFinite(from) ? from : 0) - record.logBase);
+    const lines = all.slice(begin, begin + LOG_PAGE_LIMIT);
+    const next = record.logBase + begin + lines.length;
+    return { lines, next, done: begin + lines.length >= all.length };
+  }
   const start = Math.max(record.logBase, Math.floor(Number.isFinite(from) ? from : 0));
   const offset = start - record.logBase;
   const lines = record.lines.slice(offset, offset + LOG_PAGE_LIMIT);
@@ -364,6 +382,9 @@ export function enqueueBuild(input: Omit<BuildJob, "id">): string {
     timeToTitleMs: null,
     javaMajor: null,
     cancelRequested: false,
+    savedLogPath: null,
+    logEvicted: false,
+    evictedLineCount: 0,
   };
   jobs.set(job.id, record);
   order.push(job.id);
@@ -395,13 +416,18 @@ export function cancelBuildQueue(): void {
   for (const record of activeRecords()) cancelJob(record.job.id);
 }
 
+/**
+ * Finished jobs stay queryable for the whole app session (GET /api/jobs/:id and its log); only the
+ * in-memory log lines of older finished jobs are dropped in favour of their saved log file.
+ */
 function pruneFinished(): void {
-  const finished = order.filter((id) => !isActive(jobs.get(id)!));
-  const excess = finished.length - FINISHED_JOB_LIMIT;
-  if (excess <= 0) return;
-  const drop = new Set(finished.slice(0, excess));
-  for (const id of drop) jobs.delete(id);
-  order = order.filter((id) => !drop.has(id));
+  const finished = order.map((id) => jobs.get(id)!).filter((record) => !isActive(record) && !record.logEvicted);
+  for (const record of finished.slice(0, Math.max(0, finished.length - FINISHED_IN_MEMORY_LOGS))) {
+    if (!record.savedLogPath) continue;
+    record.evictedLineCount = record.logBase + record.lines.length;
+    record.lines = [];
+    record.logEvicted = true;
+  }
 }
 
 // ---------------------------------------------------------------- execution
@@ -509,7 +535,8 @@ function finish(record: JobRecord, result: StepResult): void {
   }));
   if (result.status !== "cancelled") void recordProjectVerification(job, result, record.reason);
   try {
-    saveLog(job.projectPath, record.lines);
+    record.savedLogPath = saveLog(job.projectPath, record.lines);
+    pruneFinished();
   } catch { /* project folder may be gone */ }
   clearLiveLog(job.variantId);
   if (result.status === "cancelled") emit({ type: "cancelled", job, view: toView(record) });

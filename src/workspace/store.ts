@@ -389,8 +389,17 @@ export class WorkspaceStore {
       return;
     }
     meta.buildStatus = buildStatus;
-    if (buildStatus === "success" || buildStatus === "failed") {
-      meta.lastBuiltAt = new Date().toISOString();
+    const at = new Date().toISOString();
+    if (buildStatus === "success" || buildStatus === "failed") meta.lastBuiltAt = at;
+    if (buildStatus === "success" || buildStatus === "failed" || buildStatus === "cancelled") {
+      // Keep the status object in step with legacy callers (batch verification, wizard registration).
+      meta.lastResult = {
+        kind: "build",
+        state: buildStatus === "success" ? "succeeded" : buildStatus,
+        at,
+        reason: null,
+        phaseReached: null,
+      };
     }
     writeVariantMeta(found.variant.projectPath, meta);
     this.refresh({ force: true });

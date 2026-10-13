@@ -241,3 +241,29 @@ describe("queue behaviour", () => {
     assert.equal(listJobs().length, 3);
   });
 });
+
+describe("finished jobs", () => {
+  it("stay available for the session; older logs are served from the saved file", async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dmcl-queue-retention-"));
+    setRunnerForTests(mockRunner(calls, { launchMs: 1, lines: 3 }));
+    const ids: string[] = [];
+    for (let i = 0; i < 35; i++) {
+      const dir = path.join(root, `v${i}`);
+      fs.mkdirSync(dir, { recursive: true });
+      const id = enqueueBuild({ variantId: `keep-${i}`, projectPath: dir, type: "run" });
+      ids.push(id);
+      await waitForDone(id);
+    }
+    const first = getJob(ids[0])!;
+    assert.equal(first.state, "succeeded");
+    assert.ok(first.logLineCount >= 3);
+    const page = getJobLog(ids[0], 0)!;
+    assert.ok(page.lines.includes("game line 2"), page.lines.join("|"));
+    assert.equal(page.done, true);
+    assert.equal(getJob("no-such-job"), null);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+});
