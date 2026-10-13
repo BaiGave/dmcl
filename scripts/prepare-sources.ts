@@ -27,7 +27,7 @@ const USAGE = `用法：npm run sources:prepare -- <项目变体目录> [选项]
   --mapping <mojmap|parchment|yarn|mcp>   与 --no-gradle 连用，声明这些源码的实际命名；--mapping-version <版本> 默认取 MC 版本
   --loader <fabric|forge|neoforge>   覆盖自动识别的加载器
   --mc <版本>          覆盖自动识别的 Minecraft 版本
-  --java-home <JDK>    项目未配置 org.gradle.java.home 时使用的 JDK；省略则按构建需求取 DMCL 缓存的 JDK
+  --java-home <JDK>    项目未配置 org.gradle.java.home、DMCL 也未为其记录 JDK 时使用；省略则按构建需求取 DMCL 缓存的 JDK
   --jobs <n>           同时反编译的模组数，默认 1
   --force              忽略已有缓存重新生成
   -h, --help           显示本说明
