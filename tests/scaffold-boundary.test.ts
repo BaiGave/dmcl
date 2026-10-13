@@ -9,6 +9,7 @@ import {
 } from "../src/core/scaffold.js";
 import { scanDirectory } from "../src/workspace/detect.js";
 import { syncWorkspaceFromDisk } from "../src/workspace/sync-from-disk.js";
+import { ensureFabricApiVersion } from "../src/loaders/fabric-toolchain.js";
 
 describe("project scaffold boundary", () => {
   it("refuses to overlay a template on an imported project", async () => {
@@ -82,6 +83,29 @@ describe("project scaffold boundary", () => {
       assert.equal(fs.existsSync(path.join(sourceTree, "com")), false);
     } finally {
       fs.rmSync(parent, { recursive: true, force: true });
+    }
+  });
+  it("leaves an imported Fabric project's build files alone (no Fabric API rewrite)", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dmcl-fabric-imported-"));
+    try {
+      fs.writeFileSync(path.join(root, "gradlew.bat"), "@echo off\n");
+      const props = ["minecraft_version=1.20.1", "fabric_api_version=0.0.1-bogus", "mod_id=imported", ""].join("\r\n");
+      const build = "plugins { id 'fabric-loom' version '1.14.10' }\n";
+      fs.writeFileSync(path.join(root, "gradle.properties"), props);
+      fs.writeFileSync(path.join(root, "build.gradle"), build);
+      const originalFetch = globalThis.fetch;
+      let fetched = false;
+      globalThis.fetch = (async () => { fetched = true; throw new Error("offline"); }) as typeof fetch;
+      try {
+        assert.equal(await ensureFabricApiVersion(root, () => {}), false);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+      assert.equal(fetched, false, "no network lookup for imported projects");
+      assert.equal(fs.readFileSync(path.join(root, "gradle.properties"), "utf8"), props);
+      assert.equal(fs.readFileSync(path.join(root, "build.gradle"), "utf8"), build);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
     }
   });
 });

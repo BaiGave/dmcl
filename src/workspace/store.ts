@@ -6,7 +6,6 @@ import type { BuildStatus, ManagedMod, ModVariant, WorkspaceData } from "./types
 import { invalidateMatrixCache } from "./matrix.js";
 import { assertValidModId } from "./validate.js";
 import {
-  deleteModMeta,
   deleteVariantMeta,
   syncModMetaIdentity,
   ensureModMeta,
@@ -377,6 +376,10 @@ export class WorkspaceStore {
     return this.getMod(id);
   }
 
+  /**
+   * Removes the mod from DMCL's list: its variant folders are excluded from scanning and their registration
+   * (`.dmcl/variant.json`) is forgotten. Project files, other `.dmcl/` data and `dmcl.mod.json` stay on disk.
+   */
   removeMod(id: string): boolean {
     const mod = this.getMod(id);
     if (!mod) return false;
@@ -384,25 +387,18 @@ export class WorkspaceStore {
       this.addExcludedPath(v.projectPath);
       deleteVariantMeta(v.projectPath);
     }
-    const modDir = mod.variants[0] ? inferModDir(mod.variants[0].projectPath, mod.modId) : null;
-    if (modDir) deleteModMeta(modDir);
     invalidateMatrixCache(id);
     this.refresh({ force: true });
     return true;
   }
 
+  /** Removes one variant from DMCL's list; see removeMod for what stays on disk. */
   removeVariant(modUuid: string, variantId: string): boolean {
     const found = this.getVariant(variantId);
     if (!found || found.mod.id !== modUuid) return false;
 
     this.addExcludedPath(found.variant.projectPath);
     deleteVariantMeta(found.variant.projectPath);
-    const modDir = inferModDir(found.variant.projectPath, found.mod.modId);
-    const modMeta = readModMeta(modDir);
-    if (modMeta) {
-      modMeta.updatedAt = new Date().toISOString();
-      writeModMeta(modDir, modMeta);
-    }
     invalidateMatrixCache(found.mod.id);
     this.refresh({ force: true });
     return true;

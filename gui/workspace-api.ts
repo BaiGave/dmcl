@@ -413,15 +413,19 @@ export async function handleWorkspaceApi(
     return true;
   }
 
-  // DELETE /api/mods/:id
+  // DELETE /api/mods/:id — body { deleteFiles?: boolean }
+  // Without deleteFiles only the registration goes. With it, DMCL-generated variant folders go to the
+  // Recycle Bin; imported folders and folders with Git history are never deleted (reported in skipped).
   if (modMatch && method === "DELETE") {
     const body = (await readBody(req)) as { deleteFiles?: boolean };
     const deleteFiles = body?.deleteFiles === true;
     const m = store.getMod(modMatch[1]);
     if (!m) { json(res, { error: "模组不存在" }, 404); return true; }
 
+    const paths = m.variants.map((v: WsVariant) => v.projectPath);
+    const modDir = paths.length ? mod.inferModDir(paths[0], m.modId) : undefined;
     const wantsProgress = deleteFiles && m.variants.length > 1;
-    let fileResult: { deleted: string[]; skipped: string[] } | undefined;
+    let fileResult: { deleted: string[]; skipped: Array<{ path: string; reason: string }> } | undefined;
 
     if (deleteFiles) {
       if (wantsProgress) {
@@ -430,44 +434,38 @@ export async function handleWorkspaceApi(
           "Transfer-Encoding": "chunked",
           "X-Content-Type-Options": "nosniff",
         });
-        const paths = m.variants.map((v: WsVariant) => v.projectPath);
-        fileResult = await mod.deleteModProjects(
-          m.modId,
-          paths,
-          (done: number, total: number, p: string) => {
-            res.write(JSON.stringify({ type: "progress", done, total, path: p }) + "\n");
-          },
-        );
-        if (fileResult!.skipped.length > 0) {
-          res.write(JSON.stringify({
-            type: "error",
-            error: `有 ${fileResult!.skipped.length} 个项目目录未能删除，请关闭占用程序后重试`,
-            fileResult,
-          }) + "\n");
+      }
+      fileResult = await mod.deleteModProjects(
+        modDir,
+        paths,
+        wantsProgress
+          ? (done: number, total: number, p: string) => {
+            res.write(JSON.stringify({ type: "progress", done, total, path: p }) + "
+");
+          }
+          : undefined,
+        { trash: (target: string) => shell.trashItem(target) },
+      );
+      const blocked = fileResult!.skipped.filter((s) => s.reason !== "目录不存在");
+      if (blocked.length > 0) {
+        const error = `有 ${blocked.length} 个项目目录未删除：${blocked.map((s) => s.reason).join("；")}`;
+        if (wantsProgress) {
+          res.write(JSON.stringify({ type: "error", error, fileResult }) + "
+");
           res.end();
-          return true;
+        } else {
+          json(res, { error, fileResult }, 409);
         }
-      } else {
-        const deletedOnDisk = await mod.deleteModProjects(
-          m.modId,
-          m.variants.map((v: WsVariant) => v.projectPath),
-        );
-        fileResult = deletedOnDisk;
-        if (deletedOnDisk.skipped.length > 0) {
-          json(res, {
-            error: `有 ${deletedOnDisk.skipped.length} 个项目目录未能删除，请关闭占用程序后重试`,
-            fileResult: deletedOnDisk,
-          }, 500);
-          return true;
-        }
+        return true;
       }
     }
 
     const ok = store.removeMod(modMatch[1]);
     mod.invalidateMatrixCache(m.modId);
-    const payload = { ok, deleteFiles, fileResult, mods: store.getMods() };
+    const payload = { ok, deleteFiles, fileResult, keptOnDisk: deleteFiles ? [] : paths, mods: store.getMods() };
     if (wantsProgress) {
-      res.write(JSON.stringify({ type: "done", ...payload }) + "\n");
+      res.write(JSON.stringify({ type: "done", ...payload }) + "
+");
       res.end();
     } else {
       json(res, payload);
@@ -682,11 +680,12 @@ export async function handleWorkspaceApi(
       try {
         await mod.deleteVariantProject(
           variant.projectPath,
-          m.modId,
+          mod.inferModDir(variant.projectPath, m.modId),
           m.variants.map((v: WsVariant) => v.projectPath),
+          { trash: (target: string) => shell.trashItem(target) },
         );
       } catch (err) {
-        json(res, { error: (err as Error).message }, 400);
+        json(res, { error: (err as Error).message }, 409);
         return true;
       }
     }

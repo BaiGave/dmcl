@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { patchProperties, walkFiles } from "../core/fsutils.js";
 import { requiredJavaFor } from "../core/jdk.js";
+import { hasScaffoldMarker } from "../core/toolchain.js";
 import { pascalCase } from "../core/scaffold.js";
 import { fetchFabricApiVersion, isFabricApiVersionPublished, fabricApiVersionTargetsMc } from "../meta/fabric.js";
 import { isLegacy1xMc, isUnobfuscatedMc, mcFeatureNumber, supportsSplitSources } from "../meta/mc-version.js";
@@ -334,8 +335,13 @@ function readGradleProps(targetDir: string): Record<string, string> {
   return out;
 }
 
-/** 启动客户端前修正 Fabric API 版本（修复旧项目或错误回退导致的 MC 不兼容） */
+/**
+ * 修正 DMCL 生成项目的 Fabric API 版本（修复旧模板或错误回退导致的 MC 不兼容）。
+ * 会改写 build.gradle、gradle.properties 与源码，所以只处理带 `.dmcl/scaffold.json` 的项目；
+ * 导入项目归作者所有，直接跳过（也不发起网络查询）。
+ */
 export async function ensureFabricApiVersion(targetDir: string, log: Logger): Promise<boolean> {
+  if (!hasScaffoldMarker(targetDir)) return false;
   const detected = detectProject(targetDir);
   if (!detected || detected.loader !== "fabric") return false;
 

@@ -13,7 +13,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "sources:prepare": "tsx scripts/prepare-sources.ts",
-    "test": "npm run build && tsx --test tests/**/*.test.ts",
+    "test": "npm run build && node scripts/run-tests.mjs",
     "verify:all": "tsx src/index.ts --verify-all",
     "verify:all:force": "tsx src/index.ts --verify-all --verify-force",
     "matrix:all": "tsx src/index.ts --matrix-all",
