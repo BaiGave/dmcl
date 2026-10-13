@@ -3,6 +3,7 @@ import path from "node:path";
 import type { LoaderId, MappingsId } from "../types.js";
 import type { DetectedProject } from "./types.js";
 import { getProjectsRoot } from "./paths.js";
+import { detectProjectLoader } from "./loader-detect.js";
 
 function readProps(file: string): Record<string, string> {
   if (!fs.existsSync(file)) return {};
@@ -19,24 +20,6 @@ function isModProject(dir: string): boolean {
     ? path.join(dir, "gradlew.bat")
     : path.join(dir, "gradlew");
   return fs.existsSync(gradlew);
-}
-
-function detectLoader(dir: string, props: Record<string, string>): LoaderId | null {
-  if (props.loader_version || props.yarn_mappings || props.fabric_version) return "fabric";
-  if (props.neo_version) return "neoforge";
-  if (props.mod_id && (fs.existsSync(path.join(dir, "build.gradle")) || props.minecraft_version)) {
-    const buildGradle = fs.existsSync(path.join(dir, "build.gradle"))
-      ? fs.readFileSync(path.join(dir, "build.gradle"), "utf8")
-      : "";
-    if (buildGradle.includes("net.neoforged") || props.neo_version) return "neoforge";
-    if (buildGradle.includes("net.minecraftforge") || props.mod_id) return "forge";
-  }
-  if (fs.existsSync(path.join(dir, "src", "main", "resources", "fabric.mod.json"))) return "fabric";
-  if (fs.existsSync(path.join(dir, "src", "main", "resources", "META-INF", "neoforge.mods.toml"))) {
-    return "neoforge";
-  }
-  if (fs.existsSync(path.join(dir, "src", "main", "resources", "META-INF", "mods.toml"))) return "forge";
-  return null;
 }
 
 function readFabricModJson(dir: string): { id?: string; name?: string; version?: string } {
@@ -84,7 +67,7 @@ export function detectProject(projectPath: string): DetectedProject | null {
   const props = readProps(path.join(resolved, "gradle.properties"));
   const buildGradlePath = path.join(resolved, "build.gradle");
   const buildGradle = fs.existsSync(buildGradlePath) ? fs.readFileSync(buildGradlePath, "utf8") : "";
-  const loader = detectLoader(resolved, props);
+  const loader = detectProjectLoader(resolved);
   if (!loader) return null;
 
   let mcVersion = props.minecraft_version ?? readMcVersionFromProject(resolved) ?? "";

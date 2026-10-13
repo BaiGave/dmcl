@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { LoaderId } from "../types.js";
 import { getProjectsRoot } from "../workspace/paths.js";
+import { detectProjectLoader } from "../workspace/loader-detect.js";
 import { applyChinaMirror } from "./mirror.js";
 import {
   detectJavaMajorAt,
@@ -61,12 +62,16 @@ export interface ScaffoldMarker {
   dmclVersion: string;
 }
 
+/** 项目由 DMCL 脚手架生成；导入项目写过工具链元数据也不算 */
+export function hasScaffoldMarker(targetDir: string): boolean {
+  return fs.existsSync(path.join(path.resolve(targetDir), ".dmcl", "scaffold.json"));
+}
+
 /** DMCL 脚手架或工作区项目才允许自动改 Gradle Wrapper */
 export function isDmclManagedProject(targetDir: string): boolean {
   const resolved = path.resolve(targetDir);
-  const dmclDir = path.join(resolved, ".dmcl");
-  if (fs.existsSync(path.join(dmclDir, "scaffold.json"))) return true;
-  if (fs.existsSync(path.join(dmclDir, "toolchain.json"))) return true;
+  if (hasScaffoldMarker(resolved)) return true;
+  if (fs.existsSync(path.join(resolved, ".dmcl", "toolchain.json"))) return true;
   const projectsRoot = path.resolve(getProjectsRoot());
   return resolved === projectsRoot || resolved.startsWith(projectsRoot + path.sep);
 }
@@ -89,30 +94,6 @@ export async function writeScaffoldMarker(
     `${JSON.stringify(marker, null, 2)}\n`,
     "utf8",
   );
-}
-
-function detectLoaderFromProject(targetDir: string): LoaderId | null {
-  const propsFile = path.join(targetDir, "gradle.properties");
-  const props: Record<string, string> = {};
-  if (fs.existsSync(propsFile)) {
-    for (const line of fs.readFileSync(propsFile, "utf8").split("\n")) {
-      const m = line.match(/^\s*([^#=\s]+)\s*=\s*(.*)$/);
-      if (m) props[m[1]] = m[2].trim();
-    }
-  }
-  if (props.loader_version || props.yarn_mappings || props.fabric_version) return "fabric";
-  if (props.neo_version) return "neoforge";
-  const buildGradle = fs.existsSync(path.join(targetDir, "build.gradle"))
-    ? fs.readFileSync(path.join(targetDir, "build.gradle"), "utf8")
-    : "";
-  if (buildGradle.includes("net.neoforged")) return "neoforge";
-  if (usesForgeGradle(targetDir)) return "forge";
-  if (fs.existsSync(path.join(targetDir, "src", "main", "resources", "fabric.mod.json"))) return "fabric";
-  if (fs.existsSync(path.join(targetDir, "src", "main", "resources", "META-INF", "neoforge.mods.toml"))) {
-    return "neoforge";
-  }
-  if (fs.existsSync(path.join(targetDir, "src", "main", "resources", "META-INF", "mods.toml"))) return "forge";
-  return null;
 }
 
 function gradleVersionAtLeast(current: string, minimum: string): boolean {
@@ -138,7 +119,7 @@ export function resolveProjectToolchain(
   const mc = mcVersion ?? readMcVersionFromProject(targetDir);
   if (!mc) return null;
 
-  const loader = detectLoaderFromProject(targetDir);
+  const loader = detectProjectLoader(targetDir);
   const gradleVersion = readGradleVersion(targetDir);
   const loomVersion = readLoomVersion(targetDir);
   const compileJavaMajor = usesForgeGradleLegacy(targetDir) ? 8 : requiredJavaFor(mc);
