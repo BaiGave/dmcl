@@ -625,28 +625,6 @@ describe("MetaCache staleness", () => {
     assert.deepEqual(probe, ["1.21.1"]);
   });
 
-  it("shards isolated Gradle home when project JDK is detectable", async () => {
-    const fs = await import("node:fs");
-    const os = await import("node:os");
-    const path = await import("node:path");
-    const { findCachedJdk, detectJavaMajorAt } = await import("../src/core/jdk.js");
-    const { getIsolatedGradleHome } = await import("../src/core/gradle.js");
-    const cached = findCachedJdk(21) ?? findCachedJdk(17) ?? findCachedJdk(8);
-    if (!cached) return;
-
-    const major = detectJavaMajorAt(cached);
-    if (!major) return;
-
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dmcl-gradle-home-"));
-    try {
-      const escaped = cached.replace(/\\/g, "/");
-      fs.writeFileSync(path.join(dir, "gradle.properties"), `org.gradle.java.home=${escaped}\n`, "utf8");
-      assert.match(getIsolatedGradleHome(dir), new RegExp(`jvm-${major}$`));
-      assert.doesNotMatch(getIsolatedGradleHome(), new RegExp(`jvm-${major}$`));
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
 
   it("recommends conservative Gradle build concurrency for batch safety", async () => {
     const { recommendGradleBuildConcurrency } = await import("../gui/cpu-concurrency.js");
@@ -864,7 +842,7 @@ describe("project toolchain resolver", () => {
 
   it("passes the chosen JDK to an imported project's Gradle without touching gradle.properties", async (t) => {
     const { findCachedJdk, readJavaHomeFromProject, resolveBuildJdk } = await import("../src/core/jdk.js");
-    const { buildGradleEnv, getIsolatedGradleHome } = await import("../src/core/gradle.js");
+    const { buildGradleEnv, getIsolatedGradleHome, userGradleHome } = await import("../src/core/gradle.js");
     const { ensureProjectToolchain } = await import("../src/core/toolchain.js");
     const jdk17 = findCachedJdk(17);
     if (!jdk17) {
@@ -883,7 +861,7 @@ describe("project toolchain resolver", () => {
       assert.equal(meta.javaHome, jdk17);
       assert.equal(readJavaHomeFromProject(dir), jdk17);
       assert.equal(buildGradleEnv(dir).JAVA_HOME, jdk17);
-      assert.match(getIsolatedGradleHome(dir), /jvm-17$/);
+      assert.equal(getIsolatedGradleHome(dir), userGradleHome(), "imported projects share the user's Gradle home");
       const build = await resolveBuildJdk(dir, "1.20.1");
       assert.deepEqual([build.javaHome, build.origin], [jdk17, "dmcl"]);
 

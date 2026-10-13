@@ -123,13 +123,13 @@ function bail(message: string): never {
 function parseLoader(raw: string | undefined): LoaderId | undefined {
   if (raw === undefined) return undefined;
   if (raw === "fabric" || raw === "forge" || raw === "neoforge") return raw;
-  bail(`鏈煡鍔犺浇鍣細${raw}`);
+  bail(`未知加载器：${raw}`);
 }
 
 function parseLimit(raw: string | undefined): number | undefined {
   if (!raw) return undefined;
   const n = Number.parseInt(raw, 10);
-  if (!Number.isFinite(n) || n < 0) bail(`verify-limit 闇€涓洪潪璐熸暣鏁帮細${raw}`);
+  if (!Number.isFinite(n) || n < 0) bail(`verify-limit 需为非负整数：${raw}`);
   return n;
 }
 

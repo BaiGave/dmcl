@@ -2,7 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { ensureDmclHome, getDmclHome } from "./dmcl-home.js";
-import { detectJavaMajorAt, readJavaHomeFromProject } from "./jdk.js";
+import os from "node:os";
+import { readJavaHomeFromProject } from "./jdk.js";
+import { hasScaffoldMarker } from "./scaffold-marker.js";
 
 export { readJavaHomeFromProject } from "./jdk.js";
 
@@ -76,8 +78,9 @@ async function collectRebuildableCacheFiles(dir: string, files: CacheFile[]): Pr
 }
 
 /**
- * 删除最旧的可重建 Gradle 缓存，避免 DMCL 的隔离目录无限增长。
- * 只扫描 DMCL_HOME/cache 下的 Gradle 用户目录，保留 JDK 和原生运行库目录。
+ * 删除最旧的可重新下载的依赖文件，避免 DMCL 自己的 Gradle 目录无限增长。
+ * 只扫描 DMCL_HOME/cache 下 Gradle 目录的 modules-2/files-2.1；JDK、原生运行库、Wrapper、
+ * transforms、旧分片与用户自己的 Gradle 目录都不动。
  */
 export async function pruneDmclGradleCache(
   options: DmclGradleCachePruneOptions = {},
@@ -93,13 +96,23 @@ export async function pruneDmclGradleCache(
   }
 
   const run = async (): Promise<DmclGradleCachePruneResult> => {
+    // 只清理 DMCL 自己的 Gradle 目录里的依赖文件：Gradle 发现 files-2.1 中的文件缺失会重新下载，
+    // 而删掉 Wrapper 发行版或 transforms 里的单个文件会让缓存损坏。用户的 ~/.gradle 与旧分片从不清理。
     const cacheRoot = path.resolve(path.join(getDmclHome(), "cache"));
     const roots = [
-      path.join(cacheRoot, "gradle"),
-      path.join(cacheRoot, "source-gradle"),
+      path.join(cacheRoot, "gradle", "caches", "modules-2", "files-2.1"),
+      path.join(cacheRoot, "source-gradle", "caches", "modules-2", "files-2.1"),
     ];
     const files: CacheFile[] = [];
-    for (const root of roots) await collectRebuildableCacheFiles(root, files);
+    const realCacheRoot = await fs.promises.realpath(cacheRoot).catch(() => cacheRoot);
+    for (const root of roots) {
+      // 任何一级是链接（Junction）指向 DMCL 之外时都不跟随
+      const real = await fs.promises.realpath(root).catch(() => null);
+      if (!real) continue;
+      const rel = path.relative(realCacheRoot, real);
+      if (rel.startsWith("..") || path.isAbsolute(rel)) continue;
+      await collectRebuildableCacheFiles(root, files);
+    }
     const scannedBytes = files.reduce((sum, file) => sum + file.size, 0);
     const maxBytes = options.maxBytes ?? DMCL_GRADLE_CACHE_MAX_BYTES;
     let remainingBytes = scannedBytes;
@@ -174,22 +187,85 @@ export interface GradleClientOptions extends GradleRunOptions {
   mode: "verify" | "interactive";
 }
 
-/** 独立 Gradle 用户目录，避免用户全局 init.d 脚本破坏旧版 Gradle。 */
-export function getIsolatedGradleHome(targetDir?: string): string {
-  const base = path.join(getDmclHome(), "cache", "gradle");
-  if (!targetDir) {
-    fs.mkdirSync(base, { recursive: true });
-    return base;
-  }
-  const javaHome = readJavaHomeFromProject(targetDir);
-  let shard = "shared";
-  if (javaHome) {
-    const major = detectJavaMajorAt(javaHome);
-    if (major != null) shard = `jvm-${major}`;
-  }
-  const dir = path.join(base, shard);
+/**
+ * Gradle 用户目录只有一个来源：
+ * - 导入项目（无 `.dmcl/scaffold.json`）用用户自己的 Gradle 目录（GRADLE_USER_HOME，否则 ~/.gradle），
+ *   与作者手动执行 gradlew 共用依赖缓存与 Wrapper 发行版，首次启动不必重新下载；
+ * - DMCL 生成的项目用 DMCL 自己的一个目录（DMCL_HOME/cache/gradle），避免用户 init.d 脚本影响旧版 Gradle。
+ * 不再按 JVM 分片；旧的 jvm-* / shared 分片只读保留，见 measureLegacyGradleShards。
+ */
+export interface GradleUserHome {
+  path: string;
+  kind: "user" | "dmcl";
+}
+
+export function dmclGradleHome(): string {
+  const dir = path.join(getDmclHome(), "cache", "gradle");
   fs.mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+export function userGradleHome(env: NodeJS.ProcessEnv = process.env): string {
+  const configured = env.GRADLE_USER_HOME?.trim();
+  return configured ? path.resolve(configured) : path.join(os.homedir(), ".gradle");
+}
+
+export function resolveGradleUserHome(targetDir?: string): GradleUserHome {
+  if (targetDir && !hasScaffoldMarker(targetDir)) return { path: userGradleHome(), kind: "user" };
+  return { path: dmclGradleHome(), kind: "dmcl" };
+}
+
+/** 项目 Gradle 进程使用的用户目录（见 resolveGradleUserHome）；无参数时为 DMCL 自己的目录 */
+export function getIsolatedGradleHome(targetDir?: string): string {
+  return resolveGradleUserHome(targetDir).path;
+}
+
+/** 旧版按 JVM 分片的 Gradle 目录（DMCL_HOME/cache/gradle/jvm-*、shared），已不再写入 */
+const LEGACY_SHARD = /^(?:jvm-\d+|shared)$/i;
+
+export interface LegacyGradleShard {
+  path: string;
+  bytes: number;
+}
+
+async function directoryBytes(dir: string): Promise<number> {
+  let total = 0;
+  let entries: fs.Dirent[];
+  try {
+    entries = await fs.promises.readdir(dir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isSymbolicLink()) continue;
+    if (entry.isDirectory()) total += await directoryBytes(full);
+    else if (entry.isFile()) {
+      try {
+        total += (await fs.promises.stat(full)).size;
+      } catch { /* rotated */ }
+    }
+  }
+  return total;
+}
+
+/** 统计旧分片占用（只读，不删除），供设置页提示用户手动清理 */
+export async function measureLegacyGradleShards(): Promise<LegacyGradleShard[]> {
+  const base = path.join(getDmclHome(), "cache", "gradle");
+  let names: string[];
+  try {
+    names = (await fs.promises.readdir(base, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory() && LEGACY_SHARD.test(entry.name))
+      .map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+  const shards: LegacyGradleShard[] = [];
+  for (const name of names) {
+    const dir = path.join(base, name);
+    shards.push({ path: dir, bytes: await directoryBytes(dir) });
+  }
+  return shards;
 }
 
 /** 让子进程使用指定 JDK 的环境覆盖项（JAVA_HOME 与 PATH），不触碰项目文件 */
@@ -204,13 +280,32 @@ export function javaHomeEnvOverrides(
   };
 }
 
-/** 项目 Gradle 进程的环境：项目 JDK 经 JAVA_HOME 传入，不需要写进项目的 gradle.properties */
+/**
+ * 让 Gradle 与它派生的 JVM（守护进程、游戏客户端）把控制台输出编码为 UTF-8，
+ * 中文 Windows 默认的 GBK 输出不再乱码。经 JAVA_TOOL_OPTIONS 传入，不改项目文件；
+ * 不设置 file.encoding，编译与资源读取的行为保持不变。
+ */
+export const UTF8_CONSOLE_JVM_FLAGS = [
+  "-Dstdout.encoding=UTF-8",
+  "-Dstderr.encoding=UTF-8",
+  "-Dsun.stdout.encoding=UTF-8",
+  "-Dsun.stderr.encoding=UTF-8",
+];
+
+export function withUtf8ConsoleFlags(existing: string | undefined): string {
+  const current = existing?.trim() ?? "";
+  const missing = UTF8_CONSOLE_JVM_FLAGS.filter((flag) => !current.includes(flag.split("=")[0]));
+  return [current, ...missing].filter(Boolean).join(" ");
+}
+
+/** 项目 Gradle 进程的环境：Gradle 用户目录、项目 JDK（经 JAVA_HOME）与 UTF-8 控制台输出 */
 export function buildGradleEnv(targetDir: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
-  env.GRADLE_USER_HOME = getIsolatedGradleHome(targetDir);
   ensureDmclHome();
+  env.GRADLE_USER_HOME = getIsolatedGradleHome(targetDir);
   const javaHome = readJavaHomeFromProject(targetDir);
   if (javaHome) Object.assign(env, javaHomeEnvOverrides(javaHome, env));
+  env.JAVA_TOOL_OPTIONS = withUtf8ConsoleFlags(env.JAVA_TOOL_OPTIONS);
   return env;
 }
 
@@ -263,23 +358,57 @@ export function killProcessTree(proc: ChildProcess, isWin: boolean): void {
   } catch { /* ignore */ }
 }
 
+const utf8Strict = new TextDecoder("utf-8", { fatal: true });
+let consoleFallback: TextDecoder | null | undefined;
+
+/** 非 UTF-8 行的回退解码：Windows 控制台代码页（中文系统为 GBK/GB18030），其他平台按 UTF-8 替换 */
+function fallbackDecoder(): TextDecoder | null {
+  if (consoleFallback !== undefined) return consoleFallback;
+  const label = process.env.DMCL_CONSOLE_ENCODING?.trim() || (process.platform === "win32" ? "gb18030" : "");
+  try {
+    consoleFallback = label ? new TextDecoder(label) : null;
+  } catch {
+    consoleFallback = null;
+  }
+  return consoleFallback;
+}
+
+/** 按字节解码一行：优先 UTF-8，不合法时回退到控制台代码页（cmd.exe 自身的消息、未设置编码的旧 JVM） */
+export function decodeProcessLine(bytes: Buffer): string {
+  try {
+    return utf8Strict.decode(bytes);
+  } catch {
+    return (fallbackDecoder() ?? new TextDecoder("utf-8")).decode(bytes);
+  }
+}
+
+/**
+ * 把子进程 stdout/stderr 切成完整行。按字节缓冲到换行再解码，多字节字符跨 chunk 不会被截断；
+ * 每行单独判定 UTF-8 / 控制台代码页，混合编码的输出也能正确显示。
+ */
 export function attachLineStream(proc: ChildProcess, onLine: LineHandler): void {
   const attach = (stream: NodeJS.ReadableStream | null | undefined) => {
     if (!stream) return;
-    let pending = "";
+    let pending: Buffer = Buffer.alloc(0);
+    const emit = (raw: Buffer) => {
+      const end = raw.length > 0 && raw[raw.length - 1] === 0x0d ? raw.length - 1 : raw.length;
+      if (end > 0) onLine(decodeProcessLine(raw.subarray(0, end)));
+    };
     stream.on("data", (data: Buffer | string) => {
-      pending += data.toString();
-      const lines = pending.split("\n");
-      pending = lines.pop() ?? "";
-      for (const line of lines) {
-        const complete = line.endsWith("\r") ? line.slice(0, -1) : line;
-        if (complete.length > 0) onLine(complete);
+      const chunk = typeof data === "string" ? Buffer.from(data, "utf8") : data;
+      pending = pending.length ? Buffer.concat([pending, chunk]) : chunk;
+      let start = 0;
+      let newline = pending.indexOf(0x0a, start);
+      while (newline >= 0) {
+        emit(pending.subarray(start, newline));
+        start = newline + 1;
+        newline = pending.indexOf(0x0a, start);
       }
+      pending = start > 0 ? Buffer.from(pending.subarray(start)) : pending;
     });
     stream.on("end", () => {
-      const complete = pending.endsWith("\r") ? pending.slice(0, -1) : pending;
-      if (complete.length > 0) onLine(complete);
-      pending = "";
+      if (pending.length) emit(pending);
+      pending = Buffer.alloc(0);
     });
   };
   attach(proc.stdout);
@@ -440,7 +569,8 @@ export async function runGradleClientTask(
   const { proc, isWin } = gradleSpawn(targetDir, ["runClient", "--no-daemon"]);
   opts.onProc?.(proc, isWin);
 
-  const timeoutMs = opts.mode === "verify" ? 10 * 60 * 1000 : 60 * 60 * 1000;
+  // 只有验证模式有超时；交互运行由用户关闭游戏或取消结束，玩多久都不会被强杀
+  const verifyTimeoutMs = 10 * 60 * 1000;
   let settled = false;
   let verified = false;
   let sawGameLaunch = false;
@@ -523,12 +653,11 @@ export async function runGradleClientTask(
       }, 2000);
     }
 
-    timeoutTimer = setTimeout(() => {
-      if (!settled) {
-        if (opts.mode === "interactive") killProcessTree(proc, isWin);
-        done(1);
-      }
-    }, timeoutMs);
+    if (opts.mode === "verify") {
+      timeoutTimer = setTimeout(() => {
+        if (!settled) done(1);
+      }, verifyTimeoutMs);
+    }
 
     proc.on("close", (code) => {
       if (settled) return;

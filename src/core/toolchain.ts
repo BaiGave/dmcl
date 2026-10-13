@@ -18,6 +18,7 @@ import {
   type JdkOptions,
 } from "./jdk.js";
 import { saveToolchainMetadata } from "./toolchain-metadata.js";
+import { hasScaffoldMarker } from "./scaffold-marker.js";
 import { ensureForgeMavenizerJdkCache, usesForgeGradle } from "./forge-mavenizer.js";
 import { minimumGradleForJvm } from "./version-toolchain.js";
 
@@ -49,13 +50,7 @@ export interface ScaffoldMarker {
   dmclVersion: string;
 }
 
-/**
- * 项目由 DMCL 脚手架生成，DMCL 才可改写其 gradle.properties 与 Gradle Wrapper。
- * 导入项目即使位于工作区 projects 目录或写过 .dmcl 工具链记录也不算。
- */
-export function hasScaffoldMarker(targetDir: string): boolean {
-  return fs.existsSync(path.join(path.resolve(targetDir), ".dmcl", "scaffold.json"));
-}
+export { hasScaffoldMarker } from "./scaffold-marker.js";
 
 export async function writeScaffoldMarker(
   targetDir: string,
