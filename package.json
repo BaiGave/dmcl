@@ -23,9 +23,10 @@
     "tools:prepare": "node scripts/fetch-cfr.mjs",
     "package:win": "npm run tools:prepare && npm run build && npm run gui:build && node scripts/package-win.mjs",
     "gui:bundle": "esbuild gui/renderer-src/main.ts --bundle --outfile=gui/renderer.js --format=iife --target=es2020",
-    "gui:build": "tsc -p gui/tsconfig.json && npm run gui:bundle",
-    "gui": "npm run build && npm run gui:build && node ./node_modules/electron/cli.js gui/main.js",
-    "typecheck": "tsc -p . --noEmit && tsc -p gui/tsconfig.json --noEmit"
+    "gui:build": "node scripts/gui-start.mjs --rebuild --build-only",
+    "gui": "node scripts/gui-start.mjs",
+    "typecheck": "tsc -p . --noEmit && tsc -p gui/tsconfig.json --noEmit",
+    "gui:rebuild": "node scripts/gui-start.mjs --rebuild"
   },
   "engines": {
     "node": ">=18"
